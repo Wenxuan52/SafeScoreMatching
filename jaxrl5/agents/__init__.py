@@ -8,3 +8,4 @@ from jaxrl5.agents.td3.td3_learner import TD3Learner
 from jaxrl5.agents.ddpm_iql.ddpm_iql_learner import DDPMIQLLearner
 from jaxrl5.agents.score_matching.score_matching_learner import ScoreMatchingLearner
 from jaxrl5.agents.score_matching.ddpm_online_learner import DiffusionOnlineLearner
+from jaxrl5.agents.safe_matching.safe_matching_learner import SafeScoreMatchingLearner
