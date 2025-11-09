@@ -30,8 +30,8 @@ def evaluate(
 
         while not (terminated or truncated):
             action = policy_fn(obs)
-            # obs, reward, cost, terminated, truncated, info = env.step(action)
-            obs, reward, cost, terminated, truncated, info = _sample(env, action, ep_len)
+            obs, reward, cost, terminated, truncated, info = env.step(action)
+            # obs, reward, cost, terminated, truncated, info = _sample(env, action, ep_len)
             ep_ret += float(reward)
             ep_cost += float(cost)
             ep_len += 1

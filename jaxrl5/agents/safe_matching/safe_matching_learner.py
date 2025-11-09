@@ -72,6 +72,7 @@ class SafeScoreMatchingLearner(Agent):
     alpha_coef: float
     safety_threshold: float
     safety_grad_scale: float
+    safe_lagrange_coef: float
 
     @classmethod
     def create(
@@ -103,6 +104,7 @@ class SafeScoreMatchingLearner(Agent):
         alpha_coef: float = 0.1,
         safety_threshold: float = 0.0,
         safety_grad_scale: float = 1.0,
+        safe_lagrange_coef: float = 0.5,
     ):
         rng = jax.random.PRNGKey(seed)
         rng, actor_key, critic_key, safety_key = jax.random.split(rng, 4)
@@ -240,6 +242,7 @@ class SafeScoreMatchingLearner(Agent):
             alpha_coef=alpha_coef,
             safety_threshold=safety_threshold,
             safety_grad_scale=safety_grad_scale,
+            safe_lagrange_coef=safe_lagrange_coef,
         )
 
     def update_q(self, batch: DatasetDict) -> Tuple[Agent, Dict[str, float]]:
@@ -475,11 +478,13 @@ class SafeScoreMatchingLearner(Agent):
         )(noisy_actions)
         assert safety_jacobian.shape == (B, A)
 
-        phi = jnp.where(
-            safety_mask[:, None],
-            critic_jacobian,
-            -agent.safety_grad_scale * safety_jacobian,
-        )
+        # phi = jnp.where(
+        #     safety_mask[:, None],
+        #     agent.M_q * critic_jacobian,
+        #     -agent.safety_grad_scale * safety_jacobian,
+        # )
+
+        phi = agent.M_q * critic_jacobian - (agent.safe_lagrange_coef * agent.safety_grad_scale) * safety_jacobian
 
         def actor_loss_fn(score_model_params):
             eps_pred = agent.score_model.apply_fn(
@@ -491,7 +496,7 @@ class SafeScoreMatchingLearner(Agent):
                 training=True,
             )
             assert eps_pred.shape == (B, A)
-            target = -agent.M_q * sg(phi)
+            target = - sg(phi)
             actor_loss = jnp.square(target - eps_pred).mean(-1)
             metrics = tensorstats(actor_loss, "actor_loss")
             metrics.update(tensorstats(eps_pred, "eps_pred"))

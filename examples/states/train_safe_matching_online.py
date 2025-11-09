@@ -66,6 +66,27 @@ def _make_env(env_name: str, seed: int, allow_video: bool = True):
     return env
 
 
+# def _make_env(env_name: str, seed: int, allow_video: bool = True):
+#     env = make_safety_env(env_name, seed=seed)
+    
+#     try:
+#         builder = env.env.env.env
+#         task = builder.task
+#         if task.world is None:
+#             task._build()
+#         model = task.world.model
+#         old_ts = model.opt.timestep
+#         model.opt.timestep = 0.01
+#         print(f"[INFO] Changed timestep from {old_ts} → {model.opt.timestep}")
+#     except Exception as e:
+#         print(f"[WARN] Could not modify timestep automatically: {e}")
+
+#     env = SafetyRecordEpisodeStatistics(env, deque_size=1)
+#     if allow_video and FLAGS.wandb and FLAGS.save_video:
+#         env = WANDBVideo(env)
+#     return env
+
+
 def _make_eval_policy(agent):
     eval_agent = agent
 
@@ -120,9 +141,8 @@ def main(_):
             action, agent = agent.sample_actions(observation)
             action = np.asarray(action, dtype=np.float32)
 
-        next_obs, reward, cost, terminated, truncated, info = _sample(
-            train_env, action, episode_length
-        )
+        next_obs, reward, cost, terminated, truncated, info = train_env.step(action)
+        # next_obs, reward, cost, terminated, truncated, info = _sample(train_env, action, episode_length)
         done = bool(terminated or truncated)
 
         replay_buffer.insert(
@@ -201,4 +221,5 @@ def main(_):
 
 
 if __name__ == "__main__":
+    wandb.login(key="7feaca49acb80e68486cc6e9c40b2f2c397a0fae")
     app.run(main)

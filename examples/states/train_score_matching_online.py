@@ -91,6 +91,9 @@ def main(_):
     train_env = _make_env(FLAGS.env_name, seed=FLAGS.seed, allow_video=True)
     eval_env = _make_env(FLAGS.env_name, seed=FLAGS.seed + 42, allow_video=True)
 
+    # train_env = _make_env(FLAGS.env_name, seed=FLAGS.seed, task_kwargs=dict(sim_kwargs=dict(timestep=0.01)), allow_video=True)
+    # eval_env = _make_env(FLAGS.env_name, seed=FLAGS.seed + 42, task_kwargs=dict(sim_kwargs=dict(timestep=0.01)), allow_video=True)
+
     obs_shape = train_env.observation_space.shape
     act_shape = train_env.action_space.shape
 

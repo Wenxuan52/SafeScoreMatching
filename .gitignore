@@ -3,3 +3,7 @@
 __pycache__
 
 wandb/
+
+.err
+
+.out
