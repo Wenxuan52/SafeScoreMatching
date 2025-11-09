@@ -7,7 +7,7 @@ This repository is based on the original **Q-Score Matching (QSM)** implementati
 
 We keep the original QSM code structure and training pipeline unchanged, and **extend it with the Safe Score Matching (SSM)** designed for safe reinforcement learning.
 
-## What We Are Developing
+## Currently Developing
 
 * New training scripts and configs under:
 
