@@ -14,13 +14,13 @@ conda activate jaxrl  # or your env
 
 python examples/states/train_score_matching_online.py \
   --wandb True \
-  --project_name safety_cal \
-  --run_name carbutton_qsm_seed0 \
+  --project_name gymnasium_long \
+  --run_name carbutton_qsm \
   --seed 0 \
   --env_name SafetyCarButton1-v0 \
-  --max_steps 160000 \
-  --epoch_length 400 \
+  --max_steps 1000000 \
+  --epoch_length 2000 \
   --start_training 10000 \
-  --eval_interval 400 \
-  --log_interval 400
+  --eval_interval 2000 \
+  --log_interval 1000
 
