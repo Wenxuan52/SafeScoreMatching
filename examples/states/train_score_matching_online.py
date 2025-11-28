@@ -91,9 +91,6 @@ def main(_):
     train_env = _make_env(FLAGS.env_name, seed=FLAGS.seed, allow_video=True)
     eval_env = _make_env(FLAGS.env_name, seed=FLAGS.seed + 42, allow_video=True)
 
-    # train_env = _make_env(FLAGS.env_name, seed=FLAGS.seed, task_kwargs=dict(sim_kwargs=dict(timestep=0.01)), allow_video=True)
-    # eval_env = _make_env(FLAGS.env_name, seed=FLAGS.seed + 42, task_kwargs=dict(sim_kwargs=dict(timestep=0.01)), allow_video=True)
-
     obs_shape = train_env.observation_space.shape
     act_shape = train_env.action_space.shape
 
@@ -122,8 +119,7 @@ def main(_):
             action, agent = agent.sample_actions(observation)
             action = np.asarray(action, dtype=np.float32)
 
-        # next_obs, reward, cost, terminated, truncated, info = train_env.step(action)
-        next_obs, reward, cost, terminated, truncated, info = _sample(train_env, action, episode_length)
+        next_obs, reward, cost, terminated, truncated, info = train_env.step(action)
         done = bool(terminated or truncated)
 
         replay_buffer.insert(
