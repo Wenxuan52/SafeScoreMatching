@@ -21,3 +21,12 @@ We keep the original QSM code structure and training pipeline unchanged, and **e
   jaxrl5/agents/safe_score_matching/
   ```
 
+## Set up conda environment
+
+```bash
+conda create -n jaxrl python=3.9 -y
+pip install -e .
+pip install --upgrade "jax[cuda]" -f https://storage.googleapis.com/jax-releases/jax_cuda_releases.html
+pip install -U chex optax
+```
+

@@ -13,5 +13,5 @@ tensorflow-probability >= 0.17.0
 # dmcgym @ git+https://github.com/ikostrikov/dmcgym
 moviepy
 imageio
-gymnasium>=0.29
+gymnasium>=0.28
 safety-gymnasium>=0.5

@@ -1,7 +1,7 @@
 #!/bin/bash -l
 #SBATCH --job-name=qsm
-#SBATCH --partition=dgxl_irp
-#SBATCH --qos=dgxl_irp_high
+#SBATCH --partition=root
+#SBATCH --qos=long
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=2
 #SBATCH --mem=20G
@@ -9,12 +9,15 @@
 #SBATCH -e qsm.err
 #SBATCH -o qsm.out
 
-source /scratch_dgxl/wy524/miniconda3/etc/profile.d/conda.sh
-conda activate jaxrl  # or your env
+export HOME=/scratch_root/wy524
+mkdir -p $HOME/.config/wandb
+
+source /scratch_root/wy524/miniconda3/etc/profile.d/conda.sh
+conda activate jaxrl
 
 python examples/states/train_score_matching_online.py \
   --wandb True \
-  --project_name gymnasium_long \
+  --project_name safety_qsm \
   --run_name carbutton_qsm \
   --seed 0 \
   --env_name SafetyCarButton1-v0 \

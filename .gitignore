@@ -4,6 +4,6 @@ __pycache__
 
 wandb/
 
-.err
+*.err
 
-.out
+*.out

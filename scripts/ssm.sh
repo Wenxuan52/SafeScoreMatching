@@ -1,7 +1,7 @@
 #!/bin/bash -l
 #SBATCH --job-name=ssm
-#SBATCH --partition=dgxl_irp
-#SBATCH --qos=dgxl_irp_high
+#SBATCH --partition=root
+#SBATCH --qos=long
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=20G
