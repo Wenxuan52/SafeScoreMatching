@@ -12,6 +12,7 @@ from jaxrl5.agents.cal.agent import CALAgent
 from jaxrl5.data import ReplayBuffer
 from jaxrl5.envs import make_safety_env
 from jaxrl5.evaluation import evaluate
+from jaxrl5.utils import append_history
 from jaxrl5.wrappers import SafetyRecordEpisodeStatistics, WANDBVideo
 
 
@@ -151,6 +152,8 @@ def main(_):
     observation, _ = train_env.reset(seed=FLAGS.seed)
     episode_return, episode_cost, episode_length = 0.0, 0.0, 0
     epoch_reward, epoch_cost = 0.0, 0.0
+    experiment_name = FLAGS.run_name or FLAGS.project_name
+    latest_cost_mean = None
 
     print("Training started")
     for step in tqdm.tqdm(
@@ -208,13 +211,15 @@ def main(_):
             episode_return, episode_cost, episode_length = 0.0, 0.0, 0
 
         if step % FLAGS.epoch_length == 0:
+            latest_cost_mean = epoch_cost / FLAGS.epoch_length
             if FLAGS.wandb:
                 wandb.log(
                     {
                         "epoch/reward_sum": epoch_reward,
                         "epoch/reward_mean": epoch_reward / FLAGS.epoch_length,
                         "epoch/cost_sum": epoch_cost,
-                        "epoch/cost_mean": epoch_cost / FLAGS.epoch_length,
+                        "epoch/cost_mean": latest_cost_mean,
+                        "training/cost_mean": latest_cost_mean,
                     },
                     step=step,
                 )
@@ -234,6 +239,23 @@ def main(_):
                     f"cost={metrics['eval/cost_mean']:.2f} "
                     f"len={metrics['eval/ep_len_mean']:.1f}"
                 )
+
+            history_metrics = {
+                "eval/return_std": metrics["eval/return_std"],
+                "eval/return_mean": metrics["eval/return_mean"],
+                "eval/cost_mean": metrics["eval/cost_mean"],
+                "eval/cost_std": metrics.get("eval/cost_std", float("nan")),
+                "training/cost_mean": latest_cost_mean
+                if latest_cost_mean is not None
+                else float("nan"),
+            }
+            append_history(
+                step,
+                FLAGS.env_name,
+                experiment_name,
+                FLAGS.seed,
+                history_metrics,
+            )
 
     train_env.close()
     eval_env.close()

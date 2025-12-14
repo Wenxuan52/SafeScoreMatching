@@ -44,5 +44,6 @@ def evaluate(
         "eval/return_mean": float(np.mean(returns)),
         "eval/return_std": float(np.std(returns)),
         "eval/cost_mean": float(np.mean(costs)),
+        "eval/cost_std": float(np.std(costs)),
         "eval/ep_len_mean": float(np.mean(lengths)),
     }
