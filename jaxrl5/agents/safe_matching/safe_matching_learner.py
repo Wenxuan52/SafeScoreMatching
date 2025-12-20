@@ -487,25 +487,75 @@ class SafeScoreMatchingLearner(Agent):
         # phi = agent.M_q * critic_jacobian - (agent.safe_lagrange_coef * agent.safety_grad_scale) * safety_jacobian
 
         def actor_loss_fn(score_model_params):
+            dropout_key_inner, sampler_key = jax.random.split(dropout_key)
             eps_pred = agent.score_model.apply_fn(
                 {"params": score_model_params},
                 batch["observations"],
                 noisy_actions,
                 time,
-                rngs={"dropout": dropout_key},
+                rngs={"dropout": dropout_key_inner},
                 training=True,
             )
             assert eps_pred.shape == (B, A)
             target = - sg(phi)
-            actor_loss = jnp.square(target - eps_pred).mean(-1)
-            metrics = tensorstats(actor_loss, "actor_loss")
+            matching_loss = jnp.square(target - eps_pred).mean(-1)
+
+            # Sample inside the loss_fn so gradients from the actor energy loss
+            # flow back to the score model parameters used by the sampler.
+            a0_actions, _ = ddpm_sampler(
+                agent.score_model.apply_fn,
+                score_model_params,
+                agent.T,
+                sampler_key,
+                agent.act_dim,
+                batch["observations"],
+                agent.alphas,
+                agent.alpha_hats,
+                agent.betas,
+                agent.ddpm_temperature,
+                agent.clip_sampler,
+            )
+
+            q1 = agent.critic_1.apply_fn(
+                {"params": agent.critic_1.params},
+                batch["observations"],
+                a0_actions,
+                training=True,
+            )
+            q2 = agent.critic_2.apply_fn(
+                {"params": agent.critic_2.params},
+                batch["observations"],
+                a0_actions,
+                training=True,
+            )
+            q_min = jnp.minimum(q1, q2)
+            qc = agent.safety_critic.apply_fn(
+                {"params": agent.safety_critic.params},
+                batch["observations"],
+                a0_actions,
+                training=True,
+            )
+            penalty = jnp.maximum(0.0, qc - agent.safety_threshold)
+            actor_loss = (-q_min + agent.safe_lagrange_coef * penalty).mean()
+
+            matching_loss_mean = matching_loss.mean()
+            total_loss = actor_loss + 0.5 * matching_loss_mean
+
+            metrics = {
+                "matching_loss": matching_loss_mean,
+                "actor_loss": actor_loss,
+                "total_loss": total_loss,
+            }
+            metrics.update(tensorstats(matching_loss, "matching_loss_stats"))
+            metrics.update(tensorstats(-q_min, "neg_q_min"))
+            metrics.update(tensorstats(penalty, "penalty"))
             metrics.update(tensorstats(eps_pred, "eps_pred"))
             metrics.update(tensorstats(phi, "phi"))
             metrics.update(tensorstats(critic_jacobian, "critic_jacobian"))
             metrics.update(tensorstats(safety_jacobian, "safety_jacobian"))
             metrics["safety_mask_ratio"] = safety_mask.mean()
             metrics["safety_value_mean"] = safety_value.mean()
-            return actor_loss.mean(0), metrics
+            return total_loss, metrics
 
         key, rng = jax.random.split(rng, 2)
         grads, metrics = jax.grad(actor_loss_fn, has_aux=True)(agent.score_model.params)
