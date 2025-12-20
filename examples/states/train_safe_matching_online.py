@@ -226,9 +226,9 @@ def main(_):
                 "eval/return_mean": metrics["eval/return_mean"],
                 "eval/cost_mean": metrics["eval/cost_mean"],
                 "eval/cost_std": metrics.get("eval/cost_std", float("nan")),
-                "training/cost_mean": latest_cost_mean
-                if latest_cost_mean is not None
-                else float("nan"),
+                # "training/cost_mean": latest_cost_mean
+                # if latest_cost_mean is not None
+                # else float("nan"),
             }
             append_history(
                 step,

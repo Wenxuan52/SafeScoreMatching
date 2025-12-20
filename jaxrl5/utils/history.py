@@ -17,7 +17,7 @@ def _make_history_path(env_name: str, experiment_name: str, seed: int) -> Path:
     date_str = datetime.now().strftime("%Y-%m-%d")
     seed_str = f"seed{seed:04d}"
     experiment = experiment_name or "default_experiment"
-    base_dir = Path(env_name) / experiment / f"{date_str}_{seed_str}"
+    base_dir = "results" / Path(env_name) / experiment / f"{date_str}_{seed_str}"
     base_dir.mkdir(parents=True, exist_ok=True)
     return base_dir / "history.csv"
 

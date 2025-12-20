@@ -9,6 +9,8 @@
 #SBATCH -e test.err
 #SBATCH -o test.out
 
+nvidia-smi
+
 source /scratch_root/wy524/miniconda3/etc/profile.d/conda.sh
 conda activate jaxrl
 

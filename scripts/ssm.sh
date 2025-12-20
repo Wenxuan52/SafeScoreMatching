@@ -1,21 +1,24 @@
 #!/bin/bash -l
 #SBATCH --job-name=ssm
 #SBATCH --partition=root
-#SBATCH --qos=long
+#SBATCH --qos=intermediate
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=20G
-#SBATCH --time=24:00:00
+#SBATCH --time=12:00:00
 #SBATCH -e ssm.err
 #SBATCH -o ssm.out
 
-source /scratch_dgxl/wy524/miniconda3/etc/profile.d/conda.sh
-conda activate jaxrl  # or your env
+export HOME=/scratch_root/wy524
+mkdir -p $HOME/.config/wandb
+
+source /scratch_root/wy524/miniconda3/etc/profile.d/conda.sh
+conda activate jaxrl
 
 python examples/states/train_safe_matching_online.py \
   --wandb True \
   --project_name gymnasium_long \
-  --run_name carbutton_ssm \
+  --run_name carbutton1_ssm_test \
   --seed 0 \
   --env_name SafetyCarButton1-v0 \
   --max_steps 1000000 \

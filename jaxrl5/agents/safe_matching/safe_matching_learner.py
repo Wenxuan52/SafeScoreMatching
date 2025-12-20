@@ -478,13 +478,13 @@ class SafeScoreMatchingLearner(Agent):
         )(noisy_actions)
         assert safety_jacobian.shape == (B, A)
 
-        # phi = jnp.where(
-        #     safety_mask[:, None],
-        #     agent.M_q * critic_jacobian,
-        #     -agent.safety_grad_scale * safety_jacobian,
-        # )
+        phi = jnp.where(
+            safety_mask[:, None],
+            agent.M_q * critic_jacobian,
+            - agent.M_q * agent.safety_grad_scale * safety_jacobian,
+        )
 
-        phi = agent.M_q * critic_jacobian - (agent.safe_lagrange_coef * agent.safety_grad_scale) * safety_jacobian
+        # phi = agent.M_q * critic_jacobian - (agent.safe_lagrange_coef * agent.safety_grad_scale) * safety_jacobian
 
         def actor_loss_fn(score_model_params):
             eps_pred = agent.score_model.apply_fn(
