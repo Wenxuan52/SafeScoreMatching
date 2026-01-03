@@ -26,8 +26,11 @@ class QuadrotorTracking2DEnv(gym.Env):
         waypoint_radius: float = 1.0,
         max_episode_steps: int = 360,
         seed: Optional[int] = None,
+        render_mode: Optional[str] = None,
     ) -> None:
         super().__init__()
+
+        self.render_mode = render_mode
 
         self.dt = dt
         self.g = g
