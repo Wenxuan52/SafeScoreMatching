@@ -42,12 +42,29 @@ config_flags.DEFINE_config_file(
 
 
 def _maybe_init_wandb():
-    if FLAGS.wandb:
-        import wandb
+    if not FLAGS.wandb:
+        return
 
-        run_name = FLAGS.run_name or None
-        wandb.init(project=FLAGS.project_name, name=run_name, tags=[FLAGS.run_name] if FLAGS.run_name else None)
-        wandb.config.update(FLAGS)
+    try:
+        import wandb
+    except ImportError:
+        print("wandb is not installed; disabling wandb logging.")
+        FLAGS.wandb = False
+        return
+
+    run_name = FLAGS.run_name or None
+    try:
+        wandb.init(
+            project=FLAGS.project_name,
+            name=run_name,
+            tags=[FLAGS.run_name] if FLAGS.run_name else None,
+        )
+    except Exception as exc:  # wandb can raise UsageError if not logged in
+        print(f"wandb init failed ({exc}); disabling wandb logging.")
+        FLAGS.wandb = False
+        return
+
+    wandb.config.update(FLAGS)
 
 
 def _make_env(env_name: str, seed: int, allow_video: bool = True):
