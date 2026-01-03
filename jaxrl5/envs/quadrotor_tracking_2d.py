@@ -1,8 +1,9 @@
-import math
 from typing import Any, Dict, Optional, Tuple
 
 import gymnasium as gym
 import numpy as np
+
+from jaxrl5.envs.dynamics.quad2d import step_dynamics
 
 
 class QuadrotorTracking2DEnv(gym.Env):
@@ -44,6 +45,16 @@ class QuadrotorTracking2DEnv(gym.Env):
         self.action_space = gym.spaces.Box(
             low=0.0, high=1.0, shape=(2,), dtype=np.float32
         )
+
+        self.dyn_params: Dict[str, float] = {
+            "m": self.m,
+            "I": self.I,
+            "g": self.g,
+            "thrust_scale": self.thrust_scale,
+            "torque_scale": self.torque_scale,
+            "action_low": float(self.action_space.low[0]),
+            "action_high": float(self.action_space.high[0]),
+        }
 
         self.Q = np.diag([10.0, 1.0, 10.0, 1.0, 0.2, 0.2])
         self.R = np.diag([1e-4, 1e-4])
@@ -100,25 +111,7 @@ class QuadrotorTracking2DEnv(gym.Env):
         action = np.asarray(action, dtype=np.float32)
         action = np.clip(action, self.action_space.low, self.action_space.high)
 
-        F1 = self.thrust_scale * action[0]
-        F2 = self.thrust_scale * action[1]
-        u1 = F1 + F2
-        tau = self.torque_scale * (action[1] - action[0])
-
-        x, xdot, z, zdot, theta, thetadot = self.state.astype(np.float64)
-
-        xddot = -(u1 / self.m) * math.sin(theta)
-        zddot = (u1 / self.m) * math.cos(theta) - self.g
-        thetaddot = tau / self.I
-
-        xdot += xddot * self.dt
-        x += xdot * self.dt
-        zdot += zddot * self.dt
-        z += zdot * self.dt
-        thetadot += thetaddot * self.dt
-        theta += thetadot * self.dt
-
-        self.state = np.array([x, xdot, z, zdot, theta, thetadot], dtype=np.float32)
+        self.state = step_dynamics(self.state, action, self.dt, self.dyn_params)
 
         self._waypoint_idx = (self._waypoint_idx + 1) % len(self._waypoints)
         obs = self._get_observation()
@@ -128,6 +121,8 @@ class QuadrotorTracking2DEnv(gym.Env):
         action_err = action - self.a_ref
         reward = -float(state_err @ self.Q @ state_err + action_err @ self.R @ action_err)
 
+        x = float(self.state[0])
+        z = float(self.state[2])
         h = max(0.5 - z, z - 1.5)
         cost = float(h > 0.0)
 
