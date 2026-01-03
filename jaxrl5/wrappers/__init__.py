@@ -3,6 +3,7 @@ from __future__ import annotations
 import gymnasium as gym
 from gymnasium.wrappers import ClipAction, FlattenObservation, RescaleAction
 
+from jaxrl5.wrappers.add_cost_from_info import AddCostFromInfo
 from jaxrl5.wrappers.pixels import wrap_pixels
 from jaxrl5.wrappers.record_episode_statistics import SafetyRecordEpisodeStatistics
 from jaxrl5.wrappers.single_precision import SinglePrecision
@@ -25,7 +26,9 @@ def wrap_gym(env: gym.Env, seed: int | None = None, rescale_actions: bool = True
 
 
 __all__ = [
+    "AddCostFromInfo",
     "SafetyRecordEpisodeStatistics",
+    "SinglePrecision",
     "UniversalSeed",
     "WANDBVideo",
     "wrap_gym",
