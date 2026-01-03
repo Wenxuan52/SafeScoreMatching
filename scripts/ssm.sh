@@ -18,10 +18,10 @@ conda activate jaxrl
 python examples/states/train_safe_matching_online.py \
   --wandb True \
   --project_name gymnasium_long \
-  --run_name carbutton1_ssm_test \
+  --run_name Ant_ssm_test \
   --seed 0 \
-  --env_name SafetyCarButton1-v0 \
-  --max_steps 1000000 \
+  --env_name SafetyAntVelocity-v1 \
+  --max_steps 2000000 \
   --epoch_length 2000 \
   --start_training 10000 \
   --eval_interval 2000 \

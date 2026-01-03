@@ -10,7 +10,7 @@ def get_config():
     config.discount = 0.99
     config.tau = 0.005
     config.safety_tau = 0.01
-    config.T = 100
+    config.T = 5
     config.M_q = 120
     config.critic_hidden_dims = (512, 512)
     config.actor_hidden_dims = (512, 512)
