@@ -130,9 +130,19 @@ def main(_):
     # Persist configuration for reproducibility.
     config_path = run_dir / "config.json"
     if not config_path.exists():
+        def _serialize(val):
+            if hasattr(val, "to_dict"):
+                try:
+                    return val.to_dict()
+                except Exception:
+                    pass
+            if isinstance(val, Path):
+                return str(val)
+            return val
+
         config_snapshot = {
-            "flags": {k: FLAGS[k].value for k in FLAGS},
-            "td3_config": dict(FLAGS.config),
+            "flags": {k: _serialize(FLAGS[k].value) for k in FLAGS},
+            "td3_config": getattr(FLAGS.config, "to_dict", dict)(FLAGS.config),
         }
         config_path.write_text(json.dumps(config_snapshot, indent=2))
 
