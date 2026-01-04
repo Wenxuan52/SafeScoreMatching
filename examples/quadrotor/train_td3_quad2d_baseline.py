@@ -130,19 +130,24 @@ def main(_):
     # Persist configuration for reproducibility.
     config_path = run_dir / "config.json"
     if not config_path.exists():
-        def _serialize(val):
+        def _json_safe(val):
             if hasattr(val, "to_dict"):
                 try:
-                    return val.to_dict()
+                    return _json_safe(val.to_dict())
                 except Exception:
                     pass
+            if isinstance(val, dict):
+                return {k: _json_safe(v) for k, v in val.items()}
+            if isinstance(val, (list, tuple)):
+                return [_json_safe(v) for v in val]
             if isinstance(val, Path):
                 return str(val)
             return val
 
+        td3_cfg = _json_safe(FLAGS.config)
         config_snapshot = {
-            "flags": {k: _serialize(FLAGS[k].value) for k in FLAGS},
-            "td3_config": getattr(FLAGS.config, "to_dict", dict)(FLAGS.config),
+            "flags": {k: _json_safe(FLAGS[k].value) for k in FLAGS},
+            "td3_config": td3_cfg,
         }
         config_path.write_text(json.dumps(config_snapshot, indent=2))
 
