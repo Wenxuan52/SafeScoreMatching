@@ -3,6 +3,7 @@ from functools import partial
 from typing import Dict, Optional, Sequence, Tuple, Union
 
 import flax.linen as nn
+import flax.serialization as serialization
 import gymnasium as gym
 import jax
 import jax.numpy as jnp
@@ -556,3 +557,32 @@ class SafeScoreMatchingLearner(Agent):
         new_agent, safety_info = new_agent.update_safety(batch)
         new_agent, actor_info = new_agent.update_actor(batch)
         return new_agent, {**actor_info, **critic_info, **safety_info}
+
+    def save(self, path: str) -> None:
+        """Serialize the learner to a file using Flax msgpack."""
+        import os
+
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "wb") as f:
+            f.write(serialization.to_bytes(self))
+
+    @classmethod
+    def load(cls, path: str):
+        """Load a learner checkpoint from disk."""
+        with open(path, "rb") as f:
+            data = f.read()
+        # Prefer msgpack_restore (available in newer Flax); fall back to from_bytes.
+        if hasattr(serialization, "msgpack_restore"):
+            restored = serialization.msgpack_restore(data)
+        else:
+            restored = serialization.from_bytes(cls, data)
+
+        if isinstance(restored, cls):
+            return restored
+        if isinstance(restored, dict):
+            for value in restored.values():
+                if isinstance(value, cls):
+                    return value
+        raise TypeError(
+            f"Loaded checkpoint type {type(restored)} is not {cls.__name__} or a container of it"
+        )
