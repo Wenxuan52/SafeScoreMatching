@@ -25,4 +25,12 @@ def get_config() -> ConfigDict:
     config.safety_threshold = 0.0
     config.safety_grad_scale = 60.0
     config.safe_lagrange_coef = 1.5
+    config.lambda_lr = 3e-4
+    config.lambda_hidden_dims = (256, 256)
+    config.lambda_max = 100.0
+    config.lambda_update_coef = 1.0
+    config.actor_grad_coef = 1.0
+    config.actor_safety_grad_coef = 1.0
+    config.actor_grad_loss_coef = 1.0
+    config.actor_aux_loss_coef = 0.1
     return config
