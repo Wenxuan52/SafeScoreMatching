@@ -1,5 +1,6 @@
 """Implementations of algorithms for continuous control."""
 
+import os
 from functools import partial
 from typing import Dict, Optional, Sequence, Tuple
 
@@ -9,6 +10,7 @@ import jax.numpy as jnp
 import numpy as np
 import optax
 from flax import struct
+from flax.training import checkpoints
 from flax.training.train_state import TrainState
 
 from jaxrl5.agents.agent import Agent
@@ -259,3 +261,76 @@ class TD3Learner(Agent):
             self.exploration_noise,
         )
         return np.asarray(actions), self.replace(rng=new_rng)
+
+    def save(self, ckpt_dir: str, step: int) -> None:
+        """Save learner state to ``ckpt_dir`` with step-specific naming.
+
+        Uses ``flax.training.checkpoints`` to serialize a plain pytree dict
+        containing all TrainStates, RNG, and hyperparameters needed to
+        rehydrate the agent for evaluation.
+        """
+
+        state = {
+            "actor": self.actor,
+            "critic": self.critic,
+            "target_actor": self.target_actor,
+            "target_critic": self.target_critic,
+            "rng": self.rng,
+            "metadata": {
+                "tau": float(self.tau),
+                "discount": float(self.discount),
+                "num_qs": int(self.num_qs),
+                "num_min_qs": None if self.num_min_qs is None else int(self.num_min_qs),
+                "exploration_noise": float(self.exploration_noise),
+                "target_policy_noise": float(self.target_policy_noise),
+                "target_policy_noise_clip": float(self.target_policy_noise_clip),
+                "actor_delay": int(self.actor_delay),
+            },
+        }
+
+        checkpoints.save_checkpoint(
+            ckpt_dir,
+            target=state,
+            step=step,
+            overwrite=True,
+            keep=3,
+            prefix="ckpt_",
+        )
+
+    @classmethod
+    def load(cls, ckpt_dir: str, step: Optional[int] = None) -> "TD3Learner":
+        """Load learner state from ``ckpt_dir`` (or checkpoint file).
+
+        Args:
+            ckpt_dir: Directory containing checkpoints or the checkpoint file.
+            step: Optional explicit step; passed to ``restore_checkpoint``.
+        """
+
+        # Support both directory paths (with prefix) and direct checkpoint files.
+        ckpt_kwargs = {"target": None, "step": step}
+        if os.path.isfile(ckpt_dir):
+            ckpt = checkpoints.restore_checkpoint(ckpt_dir, **ckpt_kwargs)
+        else:
+            ckpt = checkpoints.restore_checkpoint(
+                ckpt_dir, prefix="ckpt_", **ckpt_kwargs
+            )
+
+        if ckpt is None:
+            raise FileNotFoundError(f"No checkpoint found at {ckpt_dir} (step={step})")
+
+        meta = ckpt.get("metadata", {})
+        return cls(
+            rng=ckpt["rng"],
+            actor=ckpt["actor"],
+            critic=ckpt["critic"],
+            target_actor=ckpt["target_actor"],
+            target_critic=ckpt["target_critic"],
+            tau=float(meta.get("tau", 0.005)),
+            discount=float(meta.get("discount", 0.99)),
+            num_qs=int(meta.get("num_qs", 2)),
+            num_min_qs=meta.get("num_min_qs"),
+            exploration_noise=float(meta.get("exploration_noise", 0.1)),
+            target_policy_noise=float(meta.get("target_policy_noise", 0.2)),
+            target_policy_noise_clip=float(meta.get("target_policy_noise_clip", 0.5)),
+            actor_delay=int(meta.get("actor_delay", 2)),
+        )
