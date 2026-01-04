@@ -123,7 +123,7 @@ def main(_):
     _maybe_init_wandb()
 
     run_id = FLAGS.run_name or f"{datetime.date.today().isoformat()}_seed{FLAGS.seed:04d}"
-    run_dir = Path(FLAGS.out_dir) / run_id
+    run_dir = Path(FLAGS.out_dir).expanduser().resolve() / run_id
     ckpt_root = run_dir / "checkpoints"
     ckpt_root.mkdir(parents=True, exist_ok=True)
 
@@ -176,17 +176,17 @@ def main(_):
     latest_cost_mean = None
 
     def _save_checkpoint(agent_to_save: TD3Learner, step: int, obs_sample: np.ndarray):
-        step_dir = ckpt_root / f"step_{step}"
-        step_dir.mkdir(parents=True, exist_ok=True)
-        agent_to_save.save(str(step_dir), step)
+        ckpt_root.mkdir(parents=True, exist_ok=True)
+        path = agent_to_save.save(str(ckpt_root), step)
 
         # Lightweight load check for shape correctness.
-        loaded = TD3Learner.load(str(step_dir), step)
+        loaded = TD3Learner.load(str(ckpt_root), step)
         test_action_b, _ = loaded.eval_actions(np.asarray(obs_sample[None, :], dtype=np.float32))
         test_action = np.asarray(test_action_b[0])
         assert test_action.shape == train_env.action_space.shape, "Loaded action has wrong shape"
         assert np.all(np.isfinite(test_action)), "Loaded action contains non-finite values"
         assert np.all(test_action >= -1.1) and np.all(test_action <= 1.1), "Loaded action out of expected range"
+        return path
 
     for step in tqdm.tqdm(range(1, FLAGS.max_steps + 1), smoothing=0.1, disable=not FLAGS.tqdm):
         if step < FLAGS.start_training:

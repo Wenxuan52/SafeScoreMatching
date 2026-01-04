@@ -63,12 +63,26 @@ def _resolve_checkpoint_path(base_dir: str, step: Optional[int]) -> str:
     raise FileNotFoundError(f"No checkpoints found under {ckpt_root}")
 
 
+def _unwrap_agent(obj, expected_type):
+    if isinstance(obj, expected_type):
+        return obj
+    if isinstance(obj, dict):
+        for v in obj.values():
+            if isinstance(v, expected_type):
+                return v
+    raise TypeError(
+        f"Loaded checkpoint is of type {type(obj)}; expected {expected_type.__name__}."
+    )
+
+
 def _load_agent(agent_name: str, checkpoint_path: str, env) -> object:
     """Load an agent from a checkpoint path based on its type."""
     if agent_name == "ssm":
-        return SafeScoreMatchingLearner.load(checkpoint_path)
+        loaded = SafeScoreMatchingLearner.load(checkpoint_path)
+        return _unwrap_agent(loaded, SafeScoreMatchingLearner)
     if agent_name == "td3":
-        return TD3Learner.load(checkpoint_path)
+        loaded = TD3Learner.load(checkpoint_path)
+        return _unwrap_agent(loaded, TD3Learner)
     raise ValueError(f"Unsupported agent type: {agent_name}")
 
 
