@@ -21,11 +21,18 @@ from jaxrl5.wrappers import WANDBVideo
 
 FLAGS = flags.FLAGS
 
+EVAL_STARTS = [
+    (1.0, 1.0),
+    (-1.0, 1.0),
+    (0.0, 0.53),
+    (0.0, 1.47),
+]
+
 flags.DEFINE_string("project_name", "jaxrl5_quad2d_ssm_baseline", "wandb project name.")
 flags.DEFINE_string("run_name", "", "wandb run name.")
 flags.DEFINE_string("env_name", "QuadrotorTracking2D-v0", "Environment name.")
 flags.DEFINE_integer("seed", 0, "Random seed.")
-flags.DEFINE_integer("eval_episodes", 3, "Evaluation episodes.")
+flags.DEFINE_integer("eval_episodes", 4, "Evaluation episodes.")
 flags.DEFINE_integer("log_interval", 400, "Logging interval (steps).")
 flags.DEFINE_integer("eval_interval", 5000, "Evaluation interval (steps).")
 flags.DEFINE_integer("batch_size", 256, "Mini batch size.")
@@ -97,6 +104,60 @@ def _make_eval_policy(agent: SafeScoreMatchingLearner) -> Callable[[np.ndarray],
     return policy
 
 
+def evaluate_four_starts(env, policy_fn, seed: int = 0):
+    """Replicate paper: 4 runs with static init; report mean/std of return and violation rate."""
+    returns = []
+    costs = []
+    ep_lens = []
+    viol_rates = []
+
+    for i, (x0, z0) in enumerate(EVAL_STARTS):
+        obs, _ = env.reset(
+            seed=seed + i,
+            options={
+                "init_x": x0, "init_z": z0,
+                "init_vx": 0.0, "init_vz": 0.0,
+                "init_theta": 0.0, "init_omega": 0.0,
+                # 可选：如果你想参考点也对齐某个 idx，就加 init_waypoint_idx
+            },
+        )
+
+        ep_ret = 0.0
+        ep_cost = 0.0
+        steps = 0
+        viol_sum = 0.0  # 论文是 sum c(s_t)/T；若你的 cost 是0/1，这就是违约率
+
+        terminated = False
+        truncated = False
+        while not (terminated or truncated):
+            act = policy_fn(obs)
+            obs, r, c, terminated, truncated, info = env.step(act)
+            ep_ret += float(r)
+            ep_cost += float(c)
+            viol_sum += float(c)
+            steps += 1
+
+        returns.append(ep_ret)
+        costs.append(ep_cost)
+        ep_lens.append(steps)
+        viol_rates.append(viol_sum / max(steps, 1))
+
+    returns = np.asarray(returns, np.float32)
+    costs = np.asarray(costs, np.float32)
+    ep_lens = np.asarray(ep_lens, np.float32)
+    viol_rates = np.asarray(viol_rates, np.float32)
+
+    return {
+        "eval/return_mean": float(returns.mean()),
+        "eval/return_std": float(returns.std()),
+        "eval/cost_mean": float(costs.mean()),
+        "eval/cost_std": float(costs.std()),
+        "eval/ep_len_mean": float(ep_lens.mean()),
+        "eval/ep_len_std": float(ep_lens.std()),
+        "eval/violation_rate_mean": float(viol_rates.mean()),
+        "eval/violation_rate_std": float(viol_rates.std()),
+    }
+
 def _evaluate_violation_rate(env, policy_fn: Callable[[np.ndarray], np.ndarray], episodes: int) -> Dict[str, float]:
     violation_rates = []
     for _ in range(episodes):
@@ -161,14 +222,18 @@ def _find_checkpoint(load_dir: str, load_step: Optional[int]) -> str:
 
 
 def _run_evaluation(agent: SafeScoreMatchingLearner, eval_env, step: int, experiment_name: str):
+    # 每次评估都重新创建 policy，避免闭包里的 eval_agent 被污染
     eval_policy = _make_eval_policy(agent)
-    eval_metrics = evaluate(eval_env, eval_policy, episodes=FLAGS.eval_episodes)
-    violation_metrics = _evaluate_violation_rate(eval_env, eval_policy, episodes=FLAGS.eval_episodes)
-    metrics_all = {**eval_metrics, **violation_metrics}
+
+    # 只用论文的四个起点评估
+    metrics_all = evaluate_four_starts(
+        eval_env,
+        eval_policy,
+        seed=FLAGS.seed + FLAGS.eval_seed_offset,
+    )
 
     if FLAGS.wandb:
         import wandb
-
         wandb.log(metrics_all, step=step)
     else:
         print(
@@ -194,6 +259,7 @@ def _run_evaluation(agent: SafeScoreMatchingLearner, eval_env, step: int, experi
         },
     )
     return metrics_all
+
 
 
 def _training_loop(run_dir: str) -> None:

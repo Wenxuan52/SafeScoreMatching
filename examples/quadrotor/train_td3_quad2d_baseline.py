@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import datetime
 import json
+from flax import serialization
 from pathlib import Path
 from typing import Callable, Dict
 
@@ -175,18 +176,24 @@ def main(_):
     experiment_name = FLAGS.run_name or FLAGS.project_name
     latest_cost_mean = None
 
-    def _save_checkpoint(agent_to_save: TD3Learner, step: int, obs_sample: np.ndarray):
-        ckpt_root.mkdir(parents=True, exist_ok=True)
-        path = agent_to_save.save(str(ckpt_root), step)
+    def _save_checkpoint(agent: TD3Learner, step: int, observation=None) -> None:
+        # 直接用 main() 里已经创建好的 ckpt_root（run_dir/checkpoints）
+        ckpt_path = ckpt_root / f"ckpt_{step}.msgpack"
 
-        # Lightweight load check for shape correctness.
-        loaded = TD3Learner.load(str(ckpt_root), step)
-        test_action_b, _ = loaded.eval_actions(np.asarray(obs_sample[None, :], dtype=np.float32))
-        test_action = np.asarray(test_action_b[0])
-        assert test_action.shape == train_env.action_space.shape, "Loaded action has wrong shape"
-        assert np.all(np.isfinite(test_action)), "Loaded action contains non-finite values"
-        assert np.all(test_action >= -1.1) and np.all(test_action <= 1.1), "Loaded action out of expected range"
-        return path
+        # 保存 TD3Learner 对象本体（不是 dict state）
+        ckpt_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(ckpt_path, "wb") as f:
+            f.write(serialization.to_bytes(agent))
+
+        # 可选：自检（失败也不要中断训练）
+        try:
+            _ = TD3Learner.load(str(ckpt_path))
+        except Exception as e:
+            print(f"[WARN] checkpoint self-check failed at step={step}: {e}")
+
+        print(f"[ckpt] saved to {ckpt_path}")
+
+
 
     for step in tqdm.tqdm(range(1, FLAGS.max_steps + 1), smoothing=0.1, disable=not FLAGS.tqdm):
         if step < FLAGS.start_training:

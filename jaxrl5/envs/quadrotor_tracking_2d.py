@@ -84,16 +84,46 @@ class QuadrotorTracking2DEnv(gym.Env):
         if seed is not None:
             self.seed(seed)
 
-        low = np.array([-1.5, -1.0, 0.25, -1.5, -0.2, -0.1], dtype=np.float32)
-        high = np.array([1.5, 1.0, 1.75, 1.5, 0.2, 0.1], dtype=np.float32)
-        self.state = self._rng.uniform(low, high).astype(np.float32)
+        low = np.array([-1.5, -1.0, 0.50, -1.5, -0.2, -0.1], dtype=np.float32)
+        high = np.array([ 1.5,  1.0, 1.50,  1.5,  0.2,  0.1], dtype=np.float32)
 
+
+        # 1) 先按原逻辑随机初始化
+        state = self._rng.uniform(low, high).astype(np.float32)
+
+        # 2) 如果用户传了 options，就覆盖对应维度
+        # state 各维含义按你的 low/high 推断应为：
+        # [x, x_dot, z, z_dot, theta, theta_dot]  (常见 quad2d)
+        options = options or {}
+        if "init_x" in options:
+            state[0] = float(options["init_x"])
+        if "init_vx" in options:
+            state[1] = float(options["init_vx"])
+        if "init_z" in options:
+            state[2] = float(options["init_z"])
+        if "init_vz" in options:
+            state[3] = float(options["init_vz"])
+        if "init_theta" in options:
+            state[4] = float(options["init_theta"])
+        if "init_omega" in options:
+            state[5] = float(options["init_omega"])
+
+        # 3) 写回 state
+        self.state = state
+
+        # 4) 重置计时与参考点
         self._t = 0
-        self._waypoint_idx = self._nearest_waypoint_idx(self.state[0], self.state[2])
+
+        # 可选：用户指定 waypoint idx（比如你想让参考轨迹起点也固定）
+        if "init_waypoint_idx" in options:
+            self._waypoint_idx = int(options["init_waypoint_idx"])
+        else:
+            self._waypoint_idx = self._nearest_waypoint_idx(self.state[0], self.state[2])
 
         observation = self._get_observation()
         info: Dict[str, Any] = {"idx": int(self._waypoint_idx)}
         return observation, info
+
 
     def _nearest_waypoint_idx(self, x: float, z: float) -> int:
         dx = x - self.center[0]
