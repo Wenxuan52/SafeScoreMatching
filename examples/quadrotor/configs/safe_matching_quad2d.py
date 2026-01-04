@@ -1,0 +1,28 @@
+from ml_collections import ConfigDict
+
+
+def get_config() -> ConfigDict:
+    config = ConfigDict()
+    config.model_cls = "SafeScoreMatchingLearner"
+    config.actor_lr = 3e-4
+    config.critic_lr = 3e-4
+    config.safety_lr = 3e-4
+    config.actor_hidden_dims = (256, 256, 256)
+    config.critic_hidden_dims = (256, 256)
+    config.safety_hidden_dims = (256, 256)
+    config.discount = 0.99
+    config.tau = 0.005
+    config.ddpm_temperature = 1.0
+    config.T = 5
+    config.time_dim = 64
+    config.clip_sampler = True
+    config.beta_schedule = "vp"
+    config.M_q = 1.0
+    config.cost_limit = 25.0
+    config.safety_discount = 0.99
+    config.safety_lambda = 1.0
+    config.alpha_coef = 0.1
+    config.safety_threshold = 1.0
+    config.safety_grad_scale = 1.0
+    config.safe_lagrange_coef = 0.5
+    return config
