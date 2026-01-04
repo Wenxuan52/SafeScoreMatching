@@ -13,29 +13,54 @@ from typing import Dict, List, Optional, Tuple
 
 import matplotlib.pyplot as plt
 import numpy as np
-from flax import serialization
 
 from jaxrl5.agents import SafeScoreMatchingLearner, TD3Learner
 from jaxrl5.envs import make_env
 
 
 def _resolve_checkpoint_path(base_dir: str, step: Optional[int]) -> str:
-    """Locate a checkpoint file under base_dir or its checkpoints/ subdir."""
+    """Locate a checkpoint directory or file, supporting step_* layout."""
+
     if os.path.isfile(base_dir):
         return base_dir
 
-    ckpt_dir = os.path.join(base_dir, "checkpoints") if os.path.isdir(base_dir) else base_dir
+    def _find_in_dir(dir_path: str) -> Optional[str]:
+        candidates = glob.glob(os.path.join(dir_path, "ckpt_*"))
+        if candidates:
+            return sorted(candidates)[-1]
+        return None
+
+    ckpt_root = base_dir
+    if os.path.isdir(base_dir) and os.path.isdir(os.path.join(base_dir, "checkpoints")):
+        ckpt_root = os.path.join(base_dir, "checkpoints")
+
     if step is not None:
-        candidate = os.path.join(ckpt_dir, f"ckpt_{step}.msgpack")
-        if not os.path.exists(candidate):
-            raise FileNotFoundError(f"Checkpoint not found: {candidate}")
+        step_dir = os.path.join(ckpt_root, f"step_{step}")
+        if os.path.isdir(step_dir):
+            candidate = _find_in_dir(step_dir)
+            if candidate:
+                return candidate
+        # Fallback to direct file under ckpt_root
+        direct = os.path.join(ckpt_root, f"ckpt_{step}")
+        msgpack = direct + ".msgpack"
+        for cand in (direct, msgpack):
+            if os.path.exists(cand):
+                return cand
+        raise FileNotFoundError(f"Checkpoint for step {step} not found under {ckpt_root}")
+
+    # Latest checkpoint search
+    step_dirs = sorted(glob.glob(os.path.join(ckpt_root, "step_*")))
+    if step_dirs:
+        latest = step_dirs[-1]
+        candidate = _find_in_dir(latest)
+        if candidate:
+            return candidate
+
+    candidate = _find_in_dir(ckpt_root)
+    if candidate:
         return candidate
 
-    # Find latest checkpoint by filename ordering.
-    candidates = glob.glob(os.path.join(ckpt_dir, "ckpt_*.msgpack"))
-    if not candidates:
-        raise FileNotFoundError(f"No checkpoints found under {ckpt_dir}")
-    return sorted(candidates)[-1]
+    raise FileNotFoundError(f"No checkpoints found under {ckpt_root}")
 
 
 def _load_agent(agent_name: str, checkpoint_path: str, env) -> object:
@@ -43,12 +68,7 @@ def _load_agent(agent_name: str, checkpoint_path: str, env) -> object:
     if agent_name == "ssm":
         return SafeScoreMatchingLearner.load(checkpoint_path)
     if agent_name == "td3":
-        # TD3 checkpoints are expected to be serialized via flax.serialization.to_bytes(agent).
-        with open(checkpoint_path, "rb") as f:
-            data = f.read()
-        if hasattr(serialization, "msgpack_restore"):
-            return serialization.msgpack_restore(data)
-        return serialization.from_bytes(TD3Learner, data)
+        return TD3Learner.load(checkpoint_path)
     raise ValueError(f"Unsupported agent type: {agent_name}")
 
 

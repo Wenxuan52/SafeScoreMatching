@@ -1,6 +1,9 @@
 #!/usr/bin/env python
 from __future__ import annotations
 
+import datetime
+import json
+from pathlib import Path
 from typing import Callable, Dict
 
 import numpy as np
@@ -33,6 +36,12 @@ flags.DEFINE_integer("utd_ratio", 1, "Update-to-data ratio.")
 flags.DEFINE_integer("epoch_length", 400, "Number of environment steps per epoch statistic.")
 flags.DEFINE_integer("eval_seed_offset", 12345, "Offset for evaluation environment seed.")
 flags.DEFINE_boolean("save_video", False, "Upload videos during evaluation (wandb only).")
+flags.DEFINE_integer("save_interval", 50_000, "Checkpoint save interval (steps).")
+flags.DEFINE_string(
+    "out_dir",
+    "results/QuadrotorTracking2D-v0/jaxrl5_quad2d_td3_baseline",
+    "Root directory for experiment outputs.",
+)
 config_flags.DEFINE_config_file(
     "config",
     "examples/quadrotor/configs/td3_quad2d_config.py",
@@ -113,6 +122,20 @@ def _evaluate_violation_rate(env, policy_fn: Callable[[np.ndarray], np.ndarray],
 def main(_):
     _maybe_init_wandb()
 
+    run_id = FLAGS.run_name or f"{datetime.date.today().isoformat()}_seed{FLAGS.seed:04d}"
+    run_dir = Path(FLAGS.out_dir) / run_id
+    ckpt_root = run_dir / "checkpoints"
+    ckpt_root.mkdir(parents=True, exist_ok=True)
+
+    # Persist configuration for reproducibility.
+    config_path = run_dir / "config.json"
+    if not config_path.exists():
+        config_snapshot = {
+            "flags": {k: FLAGS[k].value for k in FLAGS},
+            "td3_config": dict(FLAGS.config),
+        }
+        config_path.write_text(json.dumps(config_snapshot, indent=2))
+
     train_env = _make_env(FLAGS.env_name, seed=FLAGS.seed, allow_video=True)
     eval_env = _make_env(FLAGS.env_name, seed=FLAGS.seed + FLAGS.eval_seed_offset, allow_video=True)
 
@@ -136,6 +159,19 @@ def main(_):
     epoch_reward, epoch_cost = 0.0, 0.0
     experiment_name = FLAGS.run_name or FLAGS.project_name
     latest_cost_mean = None
+
+    def _save_checkpoint(agent_to_save: TD3Learner, step: int, obs_sample: np.ndarray):
+        step_dir = ckpt_root / f"step_{step}"
+        step_dir.mkdir(parents=True, exist_ok=True)
+        agent_to_save.save(str(step_dir), step)
+
+        # Lightweight load check for shape correctness.
+        loaded = TD3Learner.load(str(step_dir), step)
+        test_action_b, _ = loaded.eval_actions(np.asarray(obs_sample[None, :], dtype=np.float32))
+        test_action = np.asarray(test_action_b[0])
+        assert test_action.shape == train_env.action_space.shape, "Loaded action has wrong shape"
+        assert np.all(np.isfinite(test_action)), "Loaded action contains non-finite values"
+        assert np.all(test_action >= -1.1) and np.all(test_action <= 1.1), "Loaded action out of expected range"
 
     for step in tqdm.tqdm(range(1, FLAGS.max_steps + 1), smoothing=0.1, disable=not FLAGS.tqdm):
         if step < FLAGS.start_training:
@@ -246,6 +282,11 @@ def main(_):
                     "eval/ep_len_mean": metrics_all["eval/ep_len_mean"],
                 },
             )
+
+        if step % FLAGS.save_interval == 0:
+            _save_checkpoint(agent, step, observation)
+
+    _save_checkpoint(agent, FLAGS.max_steps, observation)
 
     train_env.close()
     eval_env.close()
