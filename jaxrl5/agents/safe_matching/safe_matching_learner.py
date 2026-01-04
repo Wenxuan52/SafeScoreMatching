@@ -54,6 +54,7 @@ class SafeScoreMatchingLearner(Agent):
     target_critic_2: TrainState
     safety_critic: TrainState
     target_safety_critic: TrainState
+    lambda_net: TrainState
 
     discount: float
     tau: float
@@ -74,6 +75,12 @@ class SafeScoreMatchingLearner(Agent):
     safety_threshold: float
     safety_grad_scale: float
     safe_lagrange_coef: float
+    lambda_max: float
+    lambda_update_coef: float
+    actor_grad_coef: float
+    actor_safety_grad_coef: float
+    actor_grad_loss_coef: float
+    actor_aux_loss_coef: float
 
     @classmethod
     def create(
@@ -88,6 +95,7 @@ class SafeScoreMatchingLearner(Agent):
         critic_hidden_dims: Sequence[int] = (256, 256),
         safety_hidden_dims: Sequence[int] = (256, 256),
         actor_hidden_dims: Sequence[int] = (256, 256, 256),
+        lambda_hidden_dims: Sequence[int] = (256, 256),
         discount: float = 0.99,
         tau: float = 0.005,
         safety_tau: Optional[float] = None,
@@ -106,9 +114,16 @@ class SafeScoreMatchingLearner(Agent):
         safety_threshold: float = 0.0,
         safety_grad_scale: float = 1.0,
         safe_lagrange_coef: float = 0.5,
+        lambda_lr: Union[float, optax.Schedule] = 3e-4,
+        lambda_max: float = 100.0,
+        lambda_update_coef: float = 1.0,
+        actor_grad_coef: float = 1.0,
+        actor_safety_grad_coef: float = 1.0,
+        actor_grad_loss_coef: float = 1.0,
+        actor_aux_loss_coef: float = 0.1,
     ):
         rng = jax.random.PRNGKey(seed)
-        rng, actor_key, critic_key, safety_key = jax.random.split(rng, 4)
+        rng, actor_key, critic_key, safety_key, lambda_key = jax.random.split(rng, 5)
         actions = action_space.sample()
         observations = observation_space.sample()
         action_dim = action_space.shape[-1]
@@ -201,6 +216,18 @@ class SafeScoreMatchingLearner(Agent):
             tx=optax.GradientTransformation(lambda _: None, lambda _: None),
         )
 
+        lambda_def = MLP(
+            hidden_dims=tuple(lambda_hidden_dims) + (1,),
+            activations=mish,
+            activate_final=False,
+        )
+        lambda_params = lambda_def.init(lambda_key, observations, training=True)["params"]
+        lambda_net = TrainState.create(
+            apply_fn=lambda_def.apply,
+            params=lambda_params,
+            tx=optax.adam(learning_rate=lambda_lr),
+        )
+
         if beta_schedule == "cosine":
             betas = jnp.array(cosine_beta_schedule(T))
         elif beta_schedule == "linear":
@@ -225,6 +252,7 @@ class SafeScoreMatchingLearner(Agent):
             target_critic_2=target_critic_2,
             safety_critic=safety_critic,
             target_safety_critic=target_safety_critic,
+            lambda_net=lambda_net,
             tau=tau,
             safety_tau=safety_tau,
             discount=discount,
@@ -244,7 +272,24 @@ class SafeScoreMatchingLearner(Agent):
             safety_threshold=safety_threshold,
             safety_grad_scale=safety_grad_scale,
             safe_lagrange_coef=safe_lagrange_coef,
+            lambda_max=lambda_max,
+            lambda_update_coef=lambda_update_coef,
+            actor_grad_coef=actor_grad_coef,
+            actor_safety_grad_coef=actor_safety_grad_coef,
+            actor_grad_loss_coef=actor_grad_loss_coef,
+            actor_aux_loss_coef=actor_aux_loss_coef,
         )
+
+    def _lambda_values(self, observations: jnp.ndarray, params=None) -> jnp.ndarray:
+        """Compute non-negative, clipped lambda values for each state."""
+        raw = self.lambda_net.apply_fn(
+            {"params": params if params is not None else self.lambda_net.params},
+            observations,
+            training=True,
+        )
+        lam = jnp.squeeze(nn.softplus(raw), axis=-1)
+        lam = jnp.clip(lam, 0.0, self.lambda_max)
+        return lam
 
     def update_q(self, batch: DatasetDict) -> Tuple[Agent, Dict[str, float]]:
         agent = self
@@ -333,6 +378,61 @@ class SafeScoreMatchingLearner(Agent):
             target_critic_2=target_critic_2,
             rng=rng,
         )
+        return new_agent, metrics
+
+    def update_lambda(self, batch: DatasetDict) -> Tuple[Agent, Dict[str, float]]:
+        """Update the state-dependent multiplier lambda via gradient ascent."""
+        agent = self
+        (B, _) = batch["observations"].shape
+
+        key, rng = jax.random.split(agent.rng)
+        pi_actions, rng = ddpm_sampler(
+            agent.score_model.apply_fn,
+            agent.score_model.params,
+            agent.T,
+            rng,
+            agent.act_dim,
+            batch["observations"],
+            agent.alphas,
+            agent.alpha_hats,
+            agent.betas,
+            agent.ddpm_temperature,
+            agent.clip_sampler,
+        )
+        key, rng = jax.random.split(rng, 2)
+        noise = jax.random.normal(key, shape=pi_actions.shape) * 0.1
+        pi_actions = jnp.clip(pi_actions + noise, -1.0, 1.0)
+
+        qh = agent.target_safety_critic.apply_fn(
+            {"params": agent.target_safety_critic.params},
+            batch["observations"],
+            pi_actions,
+            training=True,
+        )
+        vh = jnp.maximum(0.0, qh)
+        violation = jnp.maximum(0.0, vh - agent.safety_threshold)
+
+        lam = self._lambda_values(batch["observations"])
+        lam_sg = sg(lam)
+
+        def lambda_loss_fn(lambda_params):
+            lam_values = self._lambda_values(batch["observations"], params=lambda_params)
+            j_lambda = (lam_values * sg(violation)).mean()
+            loss = -agent.lambda_update_coef * j_lambda
+            metrics = {
+                "lambda_j": j_lambda,
+                "lambda_loss": loss,
+                **tensorstats(lam_values, "lambda"),
+                "violation_mean": violation.mean(),
+            }
+            return loss, metrics
+
+        grads, metrics = jax.grad(lambda_loss_fn, has_aux=True)(agent.lambda_net.params)
+        lambda_net = agent.lambda_net.apply_gradients(grads=grads)
+
+        new_agent = agent.replace(lambda_net=lambda_net, rng=rng)
+        metrics.update(tensorstats(lam_sg, "lambda_eval"))
+        metrics["vh_mean"] = vh.mean()
         return new_agent, metrics
 
     def _safety_targets(
@@ -461,6 +561,9 @@ class SafeScoreMatchingLearner(Agent):
         assert critic_2_jacobian.shape == (B, A)
         critic_jacobian = jnp.stack([critic_1_jacobian, critic_2_jacobian], 0).mean(0)
 
+        lam = agent._lambda_values(batch["observations"])
+        lam_sg = sg(lam)
+
         safety_q = agent.safety_critic.apply_fn(
             {"params": agent.safety_critic.params},
             batch["observations"],
@@ -468,7 +571,6 @@ class SafeScoreMatchingLearner(Agent):
             training=True,
         )
         safety_value = jnp.maximum(0.0, safety_q)
-        safety_mask = safety_value <= agent.safety_threshold
 
         safety_jacobian = jax.grad(
             lambda actions: agent.safety_critic.apply_fn(
@@ -479,13 +581,12 @@ class SafeScoreMatchingLearner(Agent):
         )(noisy_actions)
         assert safety_jacobian.shape == (B, A)
 
-        phi = jnp.where(
-            safety_mask[:, None],
-            agent.M_q * critic_jacobian,
-            - agent.M_q * agent.safety_grad_scale * safety_jacobian,
+        # Soft Lagrangian blend between reward gradient and safety gradient using statewise lambda.
+        phi = (
+            agent.actor_grad_coef * agent.M_q * critic_jacobian
+            - agent.actor_safety_grad_coef
+            * (lam_sg[:, None] * agent.safety_grad_scale * safety_jacobian)
         )
-
-        # phi = agent.M_q * critic_jacobian - (agent.safe_lagrange_coef * agent.safety_grad_scale) * safety_jacobian
 
         def actor_loss_fn(score_model_params):
             eps_pred = agent.score_model.apply_fn(
@@ -498,15 +599,37 @@ class SafeScoreMatchingLearner(Agent):
             )
             assert eps_pred.shape == (B, A)
             target = - sg(phi)
-            actor_loss = jnp.square(target - eps_pred).mean(-1)
-            metrics = tensorstats(actor_loss, "actor_loss")
+            loss_gradmatch = jnp.square(target - eps_pred).mean(-1)
+
+            # Reconstruct the denoised action x0_hat to evaluate safety value under the learned policy.
+            x0_hat = (noisy_actions - alpha_2 * eps_pred) / alpha_1
+            x0_hat = jnp.clip(x0_hat, -1.0, 1.0)
+            qh_hat = agent.safety_critic.apply_fn(
+                {"params": agent.safety_critic.params},
+                batch["observations"],
+                x0_hat,
+                training=False,
+            )
+            vh_hat = jnp.maximum(0.0, qh_hat)
+            violation_hat = jnp.maximum(0.0, vh_hat - agent.safety_threshold)
+            loss_aux = (lam_sg * violation_hat).mean()
+
+            actor_loss = (
+                agent.actor_grad_loss_coef * loss_gradmatch.mean(0)
+                + agent.actor_aux_loss_coef * loss_aux
+            )
+            metrics = tensorstats(loss_gradmatch, "actor_loss")
             metrics.update(tensorstats(eps_pred, "eps_pred"))
             metrics.update(tensorstats(phi, "phi"))
             metrics.update(tensorstats(critic_jacobian, "critic_jacobian"))
             metrics.update(tensorstats(safety_jacobian, "safety_jacobian"))
-            metrics["safety_mask_ratio"] = safety_mask.mean()
+            metrics.update(tensorstats(lam_sg, "lambda"))
             metrics["safety_value_mean"] = safety_value.mean()
-            return actor_loss.mean(0), metrics
+            metrics["vh_hat_mean"] = vh_hat.mean()
+            metrics["violation_hat_mean"] = violation_hat.mean()
+            metrics["loss_aux"] = loss_aux
+            metrics["loss_gradmatch"] = loss_gradmatch.mean()
+            return actor_loss, metrics
 
         key, rng = jax.random.split(rng, 2)
         grads, metrics = jax.grad(actor_loss_fn, has_aux=True)(agent.score_model.params)
@@ -555,8 +678,9 @@ class SafeScoreMatchingLearner(Agent):
         new_agent = self
         new_agent, critic_info = new_agent.update_q(batch)
         new_agent, safety_info = new_agent.update_safety(batch)
+        new_agent, lambda_info = new_agent.update_lambda(batch)
         new_agent, actor_info = new_agent.update_actor(batch)
-        return new_agent, {**actor_info, **critic_info, **safety_info}
+        return new_agent, {**actor_info, **critic_info, **safety_info, **lambda_info}
 
     def save(self, path: str) -> None:
         """Serialize the learner to a file using Flax msgpack."""
