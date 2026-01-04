@@ -20,7 +20,7 @@ conda activate jaxrl
 #   --max_steps 2010000 \
 #   --start_training 10000 \
 #   --eval_interval 50000 \
-#   --eval_episodes 5 \
+#   --eval_episodes 4 \
 #   --batch_size 256 \
 #   --utd_ratio 1 \
 #   --save_interval 50000 \
@@ -30,11 +30,11 @@ python examples/quadrotor/train_ssm_quad2d.py \
   --mode training \
   --env_name QuadrotorTracking2D-v0 \
   --seed 0 \
-  --max_steps 1010000 \
+  --max_steps 2010000 \
   --start_training 10000 \
   --eval_interval 50000 \
-  --eval_episodes 5 \
-  --batch_size 256 \
+  --eval_episodes 4 \
+  --batch_size 512 \
   --utd_ratio 1 \
   --save_interval 50000 \
   --wandb False

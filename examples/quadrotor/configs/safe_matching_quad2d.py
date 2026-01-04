@@ -13,12 +13,12 @@ def get_config() -> ConfigDict:
     config.discount = 0.99
     config.tau = 0.005
     config.ddpm_temperature = 0.5
-    config.T = 5
+    config.T = 100
     config.time_dim = 64
     config.clip_sampler = True
     config.beta_schedule = "vp"
     config.M_q = 120.0
-    config.cost_limit = 25.0
+    config.cost_limit = 100.0
     config.safety_discount = 0.99
     config.safety_lambda = 1.0
     config.alpha_coef = 0.25

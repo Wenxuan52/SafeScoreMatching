@@ -15,7 +15,7 @@ conda activate jaxrl
 python examples/quadrotor/visualize_policy_trajectory.py \
   --agent ssm \
   --checkpoint_dir results/QuadrotorTracking2D-v0/jaxrl5_quad2d_ssm_baseline/2026-01-04_seed0000 \
-  --checkpoint_step 2000000 \
+  --checkpoint_step 400000 \
   --episodes 1 \
   --deterministic \
   --out_dir results/visualizations/td3 \
