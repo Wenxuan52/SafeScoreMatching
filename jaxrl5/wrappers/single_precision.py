@@ -39,3 +39,20 @@ class SinglePrecision(gym.ObservationWrapper):
 
     def observation(self, observation):
         return _convert_obs(observation)
+
+    def step(self, action):
+        """Support both 5- and 6-tuple env.step signatures."""
+
+        result = self.env.step(action)
+
+        if len(result) == 5:
+            observation, reward, terminated, truncated, info = result
+            observation = self.observation(observation)
+            return observation, reward, terminated, truncated, info
+
+        if len(result) == 6:
+            observation, reward, cost, terminated, truncated, info = result
+            observation = self.observation(observation)
+            return observation, reward, cost, terminated, truncated, info
+
+        raise ValueError("Unexpected number of return values from env.step")

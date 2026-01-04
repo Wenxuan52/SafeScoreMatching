@@ -1,5 +1,7 @@
 """Implementations of algorithms for continuous control."""
 
+import glob
+import os
 from functools import partial
 from typing import Dict, Optional, Sequence, Tuple
 
@@ -9,6 +11,7 @@ import jax.numpy as jnp
 import numpy as np
 import optax
 from flax import struct
+from flax import serialization
 from flax.training.train_state import TrainState
 
 from jaxrl5.agents.agent import Agent
@@ -259,3 +262,66 @@ class TD3Learner(Agent):
             self.exploration_noise,
         )
         return np.asarray(actions), self.replace(rng=new_rng)
+
+    def save(self, ckpt_dir: str, step: int) -> str:
+        """Serialize the learner to a msgpack checkpoint.
+
+        The checkpoint is written to ``{ckpt_dir}/ckpt_{step}.msgpack``. This
+        mirrors the SafeScoreMatchingLearner format and avoids Orbax path
+        restrictions by using plain Flax serialization.
+        """
+
+        os.makedirs(ckpt_dir, exist_ok=True)
+        path = os.path.join(ckpt_dir, f"ckpt_{step}.msgpack")
+        with open(path, "wb") as f:
+            f.write(serialization.to_bytes(self))
+        return path
+
+    @classmethod
+    def load(cls, ckpt_path: str, step: Optional[int] = None) -> "TD3Learner":
+        """Load learner state from a checkpoint file or directory.
+
+        If ``ckpt_path`` is a directory, the loader searches for
+        ``ckpt_{step}.msgpack`` (or the latest when ``step`` is ``None``).
+        """
+
+        def _pick_file(base: str, requested_step: Optional[int]) -> str:
+            if os.path.isfile(base):
+                return base
+            if not os.path.isdir(base):
+                raise FileNotFoundError(f"Checkpoint path {base} does not exist")
+
+            candidates = []
+            if requested_step is not None:
+                for cand in (
+                    os.path.join(base, f"ckpt_{requested_step}.msgpack"),
+                    os.path.join(base, f"ckpt_{requested_step}"),
+                ):
+                    if os.path.isfile(cand):
+                        return cand
+            candidates = sorted(
+                glob.glob(os.path.join(base, "ckpt_*.msgpack"))
+                + glob.glob(os.path.join(base, "ckpt_*"))
+            )
+            if not candidates:
+                raise FileNotFoundError(
+                    f"No checkpoint found under {base} (step={requested_step})"
+                )
+            return candidates[-1]
+
+        resolved = _pick_file(ckpt_path, step)
+        with open(resolved, "rb") as f:
+            data = f.read()
+        if hasattr(serialization, "msgpack_restore"):
+            loaded = serialization.msgpack_restore(data)
+        else:
+            loaded = serialization.from_bytes(cls, data)
+        if isinstance(loaded, dict):
+            for v in loaded.values():
+                if isinstance(v, cls):
+                    return v
+        if not isinstance(loaded, cls):
+            raise TypeError(
+                f"Loaded checkpoint type {type(loaded)} is not TD3Learner"
+            )
+        return loaded
