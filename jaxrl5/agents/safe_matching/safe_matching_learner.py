@@ -573,5 +573,16 @@ class SafeScoreMatchingLearner(Agent):
             data = f.read()
         # Prefer msgpack_restore (available in newer Flax); fall back to from_bytes.
         if hasattr(serialization, "msgpack_restore"):
-            return serialization.msgpack_restore(data)
-        return serialization.from_bytes(cls, data)
+            restored = serialization.msgpack_restore(data)
+        else:
+            restored = serialization.from_bytes(cls, data)
+
+        if isinstance(restored, cls):
+            return restored
+        if isinstance(restored, dict):
+            for value in restored.values():
+                if isinstance(value, cls):
+                    return value
+        raise TypeError(
+            f"Loaded checkpoint type {type(restored)} is not {cls.__name__} or a container of it"
+        )

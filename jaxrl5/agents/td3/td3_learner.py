@@ -312,10 +312,13 @@ class TD3Learner(Agent):
         resolved = _pick_file(ckpt_path, step)
         with open(resolved, "rb") as f:
             data = f.read()
-        if hasattr(serialization, "msgpack_restore"):
-            loaded = serialization.msgpack_restore(data)
-        else:
-            loaded = serialization.from_bytes(cls, data)
+        # The checkpoints are written via ``serialization.to_bytes(self)``; the
+        # matching deserialization path is ``serialization.from_bytes``. Using
+        # ``msgpack_restore`` on these bytes may yield a plain ``dict`` rather
+        # than the structured learner, which triggered downstream attribute
+        # errors. Prefer ``from_bytes`` and only fall back to any embedded
+        # TD3Learner in a restored mapping for compatibility with older saves.
+        loaded = serialization.from_bytes(cls, data)
         if isinstance(loaded, dict):
             for v in loaded.values():
                 if isinstance(v, cls):
