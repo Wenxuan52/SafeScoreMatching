@@ -13,11 +13,210 @@ import optax
 from flax import struct
 from flax import serialization
 from flax.training.train_state import TrainState
+from flax.core import FrozenDict
 
 from jaxrl5.agents.agent import Agent
 from jaxrl5.data.dataset import DatasetDict
 from jaxrl5.distributions import TanhDeterministic
 from jaxrl5.networks import MLP, Ensemble, StateActionValue, subsample_ensemble
+
+
+def _iter_array_leaves_with_paths(tree) -> list[Tuple[str, np.ndarray]]:
+    """Traverse a pytree and collect array leaves with their string paths."""
+
+    leaves = []
+
+    def _walk(node, path):
+        if isinstance(node, (dict, FrozenDict)):
+            for key, value in node.items():
+                key_str = str(key)
+                new_path = key_str if path == "" else f"{path}/{key_str}"
+                _walk(value, new_path)
+            return
+        if isinstance(node, (list, tuple)):
+            for idx, value in enumerate(node):
+                key_str = str(idx)
+                new_path = key_str if path == "" else f"{path}/{key_str}"
+                _walk(value, new_path)
+            return
+
+        arr = None
+        if isinstance(node, (np.ndarray, jnp.ndarray)) or isinstance(node, jax.Array):
+            arr = np.asarray(node)
+        if arr is not None and hasattr(arr, "ndim"):
+            leaves.append((path, arr))
+
+    _walk(tree, "")
+    return leaves
+
+
+def _unwrap_params(tree):
+    unwrapped = tree
+    while isinstance(unwrapped, (dict, FrozenDict)) and "params" in unwrapped:
+        candidate = unwrapped["params"]
+        if isinstance(candidate, (dict, FrozenDict)):
+            unwrapped = candidate
+            continue
+        break
+    return unwrapped
+
+
+def _infer_actor_dims(actor_params_tree) -> Tuple[int, int, Tuple[int, ...]]:
+    params_tree = _unwrap_params(actor_params_tree)
+    leaves = _iter_array_leaves_with_paths(params_tree)
+    kernel_candidates = [
+        (path, arr)
+        for path, arr in leaves
+        if arr.ndim == 2 and "kernel" in path.lower()
+    ]
+    if not kernel_candidates:
+        kernel_candidates = [(path, arr) for path, arr in leaves if arr.ndim == 2]
+
+    if len(kernel_candidates) < 2:
+        preview = ", ".join([f"{p}: {a.shape}" for p, a in leaves[:30]])
+        raise TypeError(
+            "Unable to infer actor architecture from checkpoint params; "
+            f"found {len(kernel_candidates)} kernel candidates. Leaves preview: {preview}"
+        )
+
+    kernels = [(path, tuple(arr.shape)) for path, arr in kernel_candidates]
+    action_dim = min(shape[1] for _, shape in kernels)
+    last_candidates = [k for k in kernels if k[1][1] == action_dim]
+    last = max(last_candidates, key=lambda item: item[1][0])
+    chain = [last]
+    remaining = [k for k in kernels if k is not last]
+    current_in = last[1][0]
+
+    while True:
+        predecessors = [k for k in remaining if k[1][1] == current_in]
+        if not predecessors:
+            break
+        prev = max(predecessors, key=lambda item: item[1][0])
+        chain.append(prev)
+        remaining.remove(prev)
+        current_in = prev[1][0]
+
+    chain = chain[::-1]
+    if len(chain) < 1:
+        preview = ", ".join([f"{p}: {s}" for p, s in kernels[:30]])
+        raise TypeError(
+            "Failed to build actor layer chain from kernels. Preview: " + preview
+        )
+
+    obs_dim = chain[0][1][0]
+    hidden_dims = tuple(layer_shape[1] for _, layer_shape in chain[:-1])
+    action_dim = chain[-1][1][1]
+
+    if len(hidden_dims) < 1:
+        preview = ", ".join([f"{p}: {s}" for p, s in kernels[:30]])
+        raise TypeError(
+            "Inferred actor network has no hidden layers; kernel preview: " + preview
+        )
+
+    return obs_dim, action_dim, hidden_dims
+
+
+def _infer_num_qs_from_critic_params(critic_params_tree) -> int:
+    params_tree = _unwrap_params(critic_params_tree)
+    leaves = _iter_array_leaves_with_paths(params_tree)
+    for _, arr in leaves:
+        if hasattr(arr, "shape") and arr.ndim > 0:
+            return int(arr.shape[0])
+    raise TypeError("Unable to infer critic ensemble size from checkpoint params")
+
+
+def _restore_from_state_dict_checkpoint(
+    state: dict, *, actor_lr: float = 3e-4, critic_lr: float = 3e-4
+) -> "TD3Learner":
+    required = [
+        "actor",
+        "critic",
+        "target_actor",
+        "target_critic",
+        "rng",
+        "tau",
+        "discount",
+        "exploration_noise",
+        "target_policy_noise",
+        "target_policy_noise_clip",
+        "actor_delay",
+    ]
+    missing = [k for k in required if k not in state]
+    if missing:
+        raise TypeError(f"Checkpoint missing required keys: {missing}")
+
+    actor_state = state["actor"]
+    critic_state = state["critic"]
+    target_critic_state = state["target_critic"]
+
+    obs_dim, action_dim, hidden_dims = _infer_actor_dims(actor_state.get("params", {}))
+    num_qs = _infer_num_qs_from_critic_params(critic_state.get("params", {}))
+    target_num_qs = _infer_num_qs_from_critic_params(
+        target_critic_state.get("params", {})
+    )
+
+    actor_base_cls = partial(MLP, hidden_dims=hidden_dims, activate_final=True)
+    actor_def = TanhDeterministic(actor_base_cls, action_dim)
+    critic_base_cls = partial(
+        MLP,
+        hidden_dims=hidden_dims,
+        activate_final=True,
+        dropout_rate=None,
+        use_layer_norm=False,
+    )
+    critic_cls = partial(StateActionValue, base_cls=critic_base_cls)
+    critic_def = Ensemble(critic_cls, num=num_qs)
+    target_critic_def = Ensemble(critic_cls, num=target_num_qs)
+
+    dummy_obs = np.zeros((obs_dim,), dtype=np.float32)
+    dummy_act = np.zeros((action_dim,), dtype=np.float32)
+
+    actor_params = actor_def.init(jax.random.PRNGKey(0), dummy_obs)["params"]
+    critic_params = critic_def.init(jax.random.PRNGKey(0), dummy_obs, dummy_act)["params"]
+    target_actor_params = actor_params
+    target_critic_params = target_critic_def.init(
+        jax.random.PRNGKey(0), dummy_obs, dummy_act
+    )["params"]
+
+    noop_tx = optax.GradientTransformation(lambda _: None, lambda _: None)
+
+    actor_template = TrainState.create(
+        apply_fn=actor_def.apply, params=actor_params, tx=optax.adam(actor_lr)
+    )
+    critic_template = TrainState.create(
+        apply_fn=critic_def.apply, params=critic_params, tx=optax.adam(critic_lr)
+    )
+    target_actor_template = TrainState.create(
+        apply_fn=actor_def.apply, params=target_actor_params, tx=noop_tx
+    )
+    target_critic_template = TrainState.create(
+        apply_fn=target_critic_def.apply, params=target_critic_params, tx=noop_tx
+    )
+
+    actor = serialization.from_state_dict(actor_template, actor_state)
+    critic = serialization.from_state_dict(critic_template, critic_state)
+    target_actor = serialization.from_state_dict(target_actor_template, state["target_actor"])
+    target_critic = serialization.from_state_dict(
+        target_critic_template, target_critic_state
+    )
+
+    num_min_qs = target_num_qs if target_num_qs < num_qs else None
+
+    return TD3Learner(
+        rng=jnp.asarray(state["rng"]),
+        actor=actor,
+        critic=critic,
+        target_critic=target_critic,
+        target_actor=target_actor,
+        tau=float(state["tau"]),
+        discount=float(state["discount"]),
+        num_qs=num_qs,
+        num_min_qs=num_min_qs,
+        exploration_noise=float(state["exploration_noise"]),
+        target_policy_noise=float(state["target_policy_noise"]),
+        target_policy_noise_clip=float(state["target_policy_noise_clip"]),
+        actor_delay=int(state["actor_delay"]),
+    )
 
 
 @partial(jax.jit, static_argnames="apply_fn")
@@ -318,13 +517,18 @@ class TD3Learner(Agent):
         # than the structured learner, which triggered downstream attribute
         # errors. Prefer ``from_bytes`` and only fall back to any embedded
         # TD3Learner in a restored mapping for compatibility with older saves.
-        loaded = serialization.from_bytes(cls, data)
-        if isinstance(loaded, dict):
-            for v in loaded.values():
-                if isinstance(v, cls):
-                    return v
-        if not isinstance(loaded, cls):
-            raise TypeError(
-                f"Loaded checkpoint type {type(loaded)} is not TD3Learner"
-            )
-        return loaded
+        loaded = None
+        try:
+            loaded = serialization.from_bytes(cls, data)
+            if isinstance(loaded, cls):
+                return loaded
+        except TypeError:
+            loaded = None
+
+        state = serialization.msgpack_restore(data)
+        if isinstance(state, dict):
+            return _restore_from_state_dict_checkpoint(state)
+
+        raise TypeError(
+            f"Loaded checkpoint type {type(loaded) if loaded is not None else type(state)} is not TD3Learner"
+        )
