@@ -13,7 +13,7 @@ def get_config() -> ConfigDict:
     config.discount = 0.99
     config.tau = 0.005
     config.ddpm_temperature = 0.5
-    config.T = 100
+    config.T = 5
     config.time_dim = 64
     config.clip_sampler = True
     config.beta_schedule = "vp"
@@ -31,6 +31,6 @@ def get_config() -> ConfigDict:
     config.lambda_update_coef = 1.0
     config.actor_grad_coef = 1.0
     config.actor_safety_grad_coef = 1.0
-    config.actor_grad_loss_coef = 1.0
+    config.actor_grad_loss_coef = 0.5
     config.actor_aux_loss_coef = 0.1
     return config

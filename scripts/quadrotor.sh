@@ -1,11 +1,11 @@
 #!/bin/bash -l
 #SBATCH --job-name=quadrotor
 #SBATCH --partition=root
-#SBATCH --qos=short
+#SBATCH --qos=long
 #SBATCH --gres=gpu:1
-#SBATCH --cpus-per-task=4
+#SBATCH --cpus-per-task=12
 #SBATCH --mem=40G
-#SBATCH --time=03:00:00
+#SBATCH --time=24:00:00
 #SBATCH -e quadrotor.err
 #SBATCH -o quadrotor.out
 
@@ -29,7 +29,7 @@ conda activate jaxrl
 python examples/quadrotor/train_ssm_quad2d.py \
   --mode training \
   --env_name QuadrotorTracking2D-v0 \
-  --seed 0 \
+  --seed 1 \
   --max_steps 2010000 \
   --start_training 10000 \
   --eval_interval 50000 \
