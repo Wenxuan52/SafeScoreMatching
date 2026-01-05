@@ -140,6 +140,7 @@ def main():
     parser.add_argument("--out_dir", default="results/visualizations")
     parser.add_argument("--save_csv", action="store_true")
     parser.add_argument("--ssm_ddpm_temperature", type=float, default=None, help="Override SSM ddpm_temperature during evaluation")
+    parser.add_argument("--config_path", default=None, help="Optional path to SSM config.json/variant.json")
     args = parser.parse_args()
 
     algo = args.algo if args.algo is not None else (args.agent or "td3")
@@ -155,8 +156,12 @@ def main():
         algo,
         ckpt_path,
         step=step,
+        observation_space=env.observation_space,
+        action_space=env.action_space,
+        seed=args.seed,
         deterministic=args.deterministic,
         ddpm_temperature=args.ssm_ddpm_temperature,
+        config_path=args.config_path,
     )
     resolved_ckpt = meta.get("ckpt_resolved_path", ckpt_path)
 
