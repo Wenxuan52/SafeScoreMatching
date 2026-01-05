@@ -17,10 +17,10 @@ def get_config() -> ConfigDict:
     config.time_dim = 64
     config.clip_sampler = True
     config.beta_schedule = "vp"
-    config.M_q = 120.0
+    config.M_q = 60.0
     config.cost_limit = 100.0
     config.safety_discount = 0.99
-    config.safety_lambda = 1.0
+    config.safety_lambda = 5.0
     config.alpha_coef = 0.25
     config.safety_threshold = 0.0
     config.safety_grad_scale = 60.0
@@ -32,5 +32,5 @@ def get_config() -> ConfigDict:
     config.actor_grad_coef = 1.0
     config.actor_safety_grad_coef = 1.0
     config.actor_grad_loss_coef = 0.5
-    config.actor_aux_loss_coef = 0.1
+    config.actor_aux_loss_coef = 1.0
     return config
