@@ -15,7 +15,7 @@ from typing import Dict, List, Optional, Tuple
 import matplotlib.pyplot as plt
 import numpy as np
 
-from jaxrl5.agents import SafeScoreMatchingLearner, TD3Learner
+from jaxrl5.agents import SafeScoreMatchingLearner, TD3LagLearner, TD3Learner
 from jaxrl5.envs import make_env
 
 
@@ -225,7 +225,15 @@ def _resolve_model_cls(model_cls: str):
     except Exception:
         pass
 
-    # 3) fallback
+    # 3) jaxrl5.agents.td3.td3_lag_learner
+    try:
+        mod = importlib.import_module("jaxrl5.agents.td3.td3_lag_learner")
+        if hasattr(mod, model_cls):
+            return getattr(mod, model_cls)
+    except Exception:
+        pass
+
+    # 4) fallback
     return TD3Learner
 
 
@@ -395,7 +403,14 @@ def _load_agent(agent_name: str, checkpoint_path: str, env, seed: int) -> object
             learner = _restore_ssm_from_state_dict(learner, state)
             return learner
 
-    if agent_name == "td3":
+    if agent_name in ("td3", "td3_lag"):
+        if agent_name == "td3_lag":
+            try:
+                loaded = TD3LagLearner.load(checkpoint_path)
+                return _unwrap_agent(loaded, TD3LagLearner)
+            except Exception:
+                pass
+
         try:
             loaded = TD3Learner.load(checkpoint_path)
             return _unwrap_agent(loaded, TD3Learner)
@@ -542,7 +557,7 @@ def main():
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--episodes", type=int, default=1)
     parser.add_argument("--deterministic", action="store_true", help="Use deterministic actions (eval)")
-    parser.add_argument("--agent", choices=["td3", "ssm"], required=True)
+    parser.add_argument("--agent", choices=["td3", "td3_lag", "ssm"], required=True)
     parser.add_argument("--checkpoint_dir", required=True, help="Checkpoint directory or file")
     parser.add_argument("--checkpoint_step", type=int, default=None, help="Specific checkpoint step")
     parser.add_argument("--out_dir", default="results/visualizations")
