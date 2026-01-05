@@ -12,8 +12,8 @@ import numpy as np
 import optax
 from flax import serialization
 from flax import struct
-from flax import traverse_util
 from flax.training.train_state import TrainState
+from flax.core import FrozenDict
 
 from jaxrl5.agents.agent import Agent
 from jaxrl5.data.dataset import DatasetDict
@@ -35,6 +35,35 @@ def _sample_actions(
 @partial(jax.jit, static_argnames="apply_fn")
 def _eval_actions(apply_fn, params, observations: np.ndarray) -> np.ndarray:
     return apply_fn({"params": params}, observations)
+
+
+def _iter_array_leaves_with_paths(tree) -> list[Tuple[str, np.ndarray]]:
+    """Traverse a pytree and collect array leaves with their string paths."""
+
+    leaves = []
+
+    def _walk(node, path):
+        if isinstance(node, (dict, FrozenDict)):
+            for key, value in node.items():
+                key_str = str(key)
+                new_path = key_str if path == "" else f"{path}/{key_str}"
+                _walk(value, new_path)
+            return
+        if isinstance(node, (list, tuple)):
+            for idx, value in enumerate(node):
+                key_str = str(idx)
+                new_path = key_str if path == "" else f"{path}/{key_str}"
+                _walk(value, new_path)
+            return
+
+        arr = None
+        if isinstance(node, (np.ndarray, jnp.ndarray)) or isinstance(node, jax.Array):
+            arr = np.asarray(node)
+        if arr is not None and hasattr(arr, "ndim"):
+            leaves.append((path, arr))
+
+    _walk(tree, "")
+    return leaves
 
 
 class TD3LagLearner(Agent):
@@ -462,23 +491,68 @@ class TD3LagLearner(Agent):
                     + ", ".join(sorted(missing))
                 )
 
-            def _infer_actor_dims(actor_params):
-                flat = traverse_util.flatten_dict(actor_params, sep="/")
-                dense_shapes = [
-                    ("/".join(k), v.shape)
-                    for k, v in flat.items()
-                    if isinstance(v, (np.ndarray, jnp.ndarray))
-                    and v.ndim == 2
-                    and k[-1] == "kernel"
+            def _unwrap_params(tree_like):
+                current = tree_like
+                while isinstance(current, (dict, FrozenDict)) and "params" in current:
+                    maybe = current.get("params")
+                    if isinstance(maybe, (dict, FrozenDict)):
+                        current = maybe
+                        continue
+                    if len(current.keys()) == 1:
+                        current = maybe
+                        break
+                    break
+                return current
+
+            def _infer_actor_dims(actor_params_tree):
+                params_tree = _unwrap_params(actor_params_tree)
+                leaves = _iter_array_leaves_with_paths(params_tree)
+
+                kernel_candidates = [
+                    (path, arr)
+                    for path, arr in leaves
+                    if arr.ndim == 2 and "kernel" in path.lower()
                 ]
-                if not dense_shapes:
-                    raise TypeError("Unable to infer actor architecture from checkpoint params")
-                dense_shapes.sort(key=lambda kv: kv[0])
-                shapes = [shape for _, shape in dense_shapes]
-                obs_dim = int(shapes[0][0])
-                action_dim = int(shapes[-1][1])
-                hidden_dims = tuple(int(s[1]) for s in shapes[:-1])
-                return obs_dim, action_dim, hidden_dims
+                if not kernel_candidates:
+                    kernel_candidates = [(path, arr) for path, arr in leaves if arr.ndim == 2]
+
+                if len(kernel_candidates) < 2:
+                    preview = ", ".join(
+                        [f"{p}:{np.asarray(a).shape}" for p, a in leaves[:30]]
+                    )
+                    raise TypeError(
+                        "Unable to infer actor architecture from checkpoint params; "
+                        f"found {len(kernel_candidates)} 2D kernels. Array leaves: {preview}"
+                    )
+
+                shapes = [(path, np.asarray(arr).shape) for path, arr in kernel_candidates]
+                action_dim = min(shape[1] for _, shape in shapes)
+                last_candidates = [
+                    (path, shape) for path, shape in shapes if shape[1] == action_dim
+                ]
+                last_path, last_shape = max(last_candidates, key=lambda kv: kv[1][0])
+                chain = [(last_path, last_shape)]
+                remaining = [item for item in shapes if item != (last_path, last_shape)]
+                current_in = last_shape[0]
+
+                while True:
+                    predecessors = [
+                        (path, shape)
+                        for path, shape in remaining
+                        if shape[1] == current_in
+                    ]
+                    if not predecessors:
+                        break
+                    best = max(predecessors, key=lambda kv: kv[1][0])
+                    chain.insert(0, best)
+                    remaining.remove(best)
+                    current_in = best[1][0]
+
+                obs_dim = int(chain[0][1][0])
+                hidden_dims = tuple(int(shape[1]) for _, shape in chain[:-1])
+                if not hidden_dims:
+                    hidden_dims = (int(chain[-1][1][0]),)
+                return obs_dim, int(action_dim), hidden_dims
 
             def _infer_num_qs(params):
                 for leaf in jax.tree_util.tree_leaves(params):
@@ -486,7 +560,7 @@ class TD3LagLearner(Agent):
                         return int(leaf.shape[0])
                 raise TypeError("Unable to infer ensemble size from critic params")
 
-            actor_params = state_dict["actor"]["params"]
+            actor_params = _unwrap_params(state_dict["actor"].get("params", {}))
             obs_dim, action_dim, hidden_dims = _infer_actor_dims(actor_params)
 
             critic_params = state_dict["critic"]["params"]
