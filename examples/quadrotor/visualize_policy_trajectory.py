@@ -3,6 +3,9 @@ import csv
 import os
 from typing import Dict, List
 
+os.environ.setdefault("MPLCONFIGDIR", "/tmp/matplotlib_config")
+os.makedirs(os.environ["MPLCONFIGDIR"], exist_ok=True)
+
 import matplotlib.pyplot as plt
 import numpy as np
 
@@ -128,7 +131,7 @@ def main():
     parser.add_argument("--num_episodes", type=int, default=1)
     parser.add_argument("--episodes", type=int, default=None, help="Alias for num_episodes")
     parser.add_argument("--deterministic", action="store_true", help="Use deterministic actions (eval)")
-    parser.add_argument("--algo", choices=["td3", "td3_lag", "ssm"], default="td3")
+    parser.add_argument("--algo", choices=["td3", "td3_lag", "ssm"], default=None)
     parser.add_argument("--agent", choices=["td3", "td3_lag", "ssm"], default=None, help="Deprecated alias for --algo")
     parser.add_argument("--ckpt_path", default=None, help="Checkpoint directory or file")
     parser.add_argument("--checkpoint_dir", default=None, help="Deprecated alias for --ckpt_path")

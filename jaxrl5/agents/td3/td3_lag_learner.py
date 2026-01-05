@@ -12,6 +12,7 @@ import numpy as np
 import optax
 from flax import serialization
 from flax import struct
+from flax import traverse_util
 from flax.training.train_state import TrainState
 
 from jaxrl5.agents.agent import Agent
@@ -398,7 +399,15 @@ class TD3LagLearner(Agent):
         return path
 
     @classmethod
-    def load(cls, ckpt_path: str, step: Optional[int] = None) -> "TD3LagLearner":
+    def load(
+        cls,
+        ckpt_path: str,
+        step: Optional[int] = None,
+        *,
+        lambda_lr: float = 1e-3,
+        cost_limit: float = 0.0,
+        lambda_max: Optional[float] = 1000.0,
+    ) -> "TD3LagLearner":
         """Load learner state from a checkpoint file or directory."""
 
         def _pick_file(base: str, requested_step: Optional[int]) -> str:
@@ -428,13 +437,187 @@ class TD3LagLearner(Agent):
         resolved = _pick_file(ckpt_path, step)
         with open(resolved, "rb") as f:
             data = f.read()
-        loaded = serialization.from_bytes(cls, data)
+
+        def _restore_from_state_dict_checkpoint(state_dict: dict) -> "TD3LagLearner":
+            required_keys = {
+                "actor",
+                "critic",
+                "target_actor",
+                "target_critic",
+                "cost_critic",
+                "target_cost_critic",
+                "rng",
+                "tau",
+                "discount",
+                "exploration_noise",
+                "target_policy_noise",
+                "target_policy_noise_clip",
+                "actor_delay",
+                "lagrangian_lambda",
+            }
+            missing = required_keys.difference(state_dict.keys())
+            if missing:
+                raise TypeError(
+                    "Checkpoint is missing required keys for TD3LagLearner: "
+                    + ", ".join(sorted(missing))
+                )
+
+            def _infer_actor_dims(actor_params):
+                flat = traverse_util.flatten_dict(actor_params, sep="/")
+                dense_shapes = [
+                    ("/".join(k), v.shape)
+                    for k, v in flat.items()
+                    if isinstance(v, (np.ndarray, jnp.ndarray))
+                    and v.ndim == 2
+                    and k[-1] == "kernel"
+                ]
+                if not dense_shapes:
+                    raise TypeError("Unable to infer actor architecture from checkpoint params")
+                dense_shapes.sort(key=lambda kv: kv[0])
+                shapes = [shape for _, shape in dense_shapes]
+                obs_dim = int(shapes[0][0])
+                action_dim = int(shapes[-1][1])
+                hidden_dims = tuple(int(s[1]) for s in shapes[:-1])
+                return obs_dim, action_dim, hidden_dims
+
+            def _infer_num_qs(params):
+                for leaf in jax.tree_util.tree_leaves(params):
+                    if hasattr(leaf, "shape") and leaf.shape:
+                        return int(leaf.shape[0])
+                raise TypeError("Unable to infer ensemble size from critic params")
+
+            actor_params = state_dict["actor"]["params"]
+            obs_dim, action_dim, hidden_dims = _infer_actor_dims(actor_params)
+
+            critic_params = state_dict["critic"]["params"]
+            target_critic_params = state_dict["target_critic"]["params"]
+            cost_critic_params = state_dict["cost_critic"]["params"]
+            target_cost_critic_params = state_dict["target_cost_critic"]["params"]
+
+            num_qs = _infer_num_qs(critic_params)
+            num_target_qs = _infer_num_qs(target_critic_params)
+            num_cost_qs = _infer_num_qs(cost_critic_params)
+            num_target_cost_qs = _infer_num_qs(target_cost_critic_params)
+
+            rng = jnp.asarray(state_dict["rng"])
+
+            actor_base_cls = partial(MLP, hidden_dims=hidden_dims, activate_final=True)
+            actor_def = TanhDeterministic(actor_base_cls, action_dim)
+            dummy_obs = jnp.zeros((obs_dim,), dtype=jnp.float32)
+            actor_vars = actor_def.init(jax.random.PRNGKey(0), dummy_obs)
+            actor_template = TrainState.create(
+                apply_fn=actor_def.apply,
+                params=actor_vars["params"],
+                tx=optax.adam(learning_rate=3e-4),
+            )
+            target_actor_template = TrainState.create(
+                apply_fn=actor_def.apply,
+                params=actor_vars["params"],
+                tx=optax.GradientTransformation(lambda _: None, lambda _: None),
+            )
+
+            critic_base_cls = partial(
+                MLP,
+                hidden_dims=hidden_dims,
+                activate_final=True,
+                dropout_rate=None,
+                use_layer_norm=False,
+            )
+            critic_cls = partial(StateActionValue, base_cls=critic_base_cls)
+
+            dummy_action = jnp.zeros((action_dim,), dtype=jnp.float32)
+
+            critic_def = Ensemble(critic_cls, num=num_qs)
+            critic_template = TrainState.create(
+                apply_fn=critic_def.apply,
+                params=critic_def.init(jax.random.PRNGKey(1), dummy_obs, dummy_action)[
+                    "params"
+                ],
+                tx=optax.adam(learning_rate=3e-4),
+            )
+
+            target_critic_def = Ensemble(critic_cls, num=num_target_qs)
+            target_critic_template = TrainState.create(
+                apply_fn=target_critic_def.apply,
+                params=target_critic_def.init(
+                    jax.random.PRNGKey(2), dummy_obs, dummy_action
+                )["params"],
+                tx=optax.GradientTransformation(lambda _: None, lambda _: None),
+            )
+
+            cost_critic_def = Ensemble(critic_cls, num=num_cost_qs)
+            cost_critic_template = TrainState.create(
+                apply_fn=cost_critic_def.apply,
+                params=cost_critic_def.init(
+                    jax.random.PRNGKey(3), dummy_obs, dummy_action
+                )["params"],
+                tx=optax.adam(learning_rate=3e-4),
+            )
+
+            target_cost_critic_def = Ensemble(critic_cls, num=num_target_cost_qs)
+            target_cost_critic_template = TrainState.create(
+                apply_fn=target_cost_critic_def.apply,
+                params=target_cost_critic_def.init(
+                    jax.random.PRNGKey(4), dummy_obs, dummy_action
+                )["params"],
+                tx=optax.GradientTransformation(lambda _: None, lambda _: None),
+            )
+
+            actor = serialization.from_state_dict(actor_template, state_dict["actor"])
+            target_actor = serialization.from_state_dict(
+                target_actor_template, state_dict["target_actor"]
+            )
+            critic = serialization.from_state_dict(critic_template, state_dict["critic"])
+            target_critic = serialization.from_state_dict(
+                target_critic_template, state_dict["target_critic"]
+            )
+            cost_critic = serialization.from_state_dict(
+                cost_critic_template, state_dict["cost_critic"]
+            )
+            target_cost_critic = serialization.from_state_dict(
+                target_cost_critic_template, state_dict["target_cost_critic"]
+            )
+
+            return cls(
+                rng=rng,
+                actor=actor,
+                critic=critic,
+                cost_critic=cost_critic,
+                target_critic=target_critic,
+                target_cost_critic=target_cost_critic,
+                target_actor=target_actor,
+                tau=float(state_dict.get("tau", 0.005)),
+                discount=float(state_dict.get("discount", 0.99)),
+                num_qs=num_qs,
+                num_min_qs=None,
+                exploration_noise=float(state_dict.get("exploration_noise", 0.1)),
+                target_policy_noise=float(state_dict.get("target_policy_noise", 0.2)),
+                target_policy_noise_clip=float(
+                    state_dict.get("target_policy_noise_clip", 0.5)
+                ),
+                actor_delay=int(state_dict.get("actor_delay", 2)),
+                lagrangian_lambda=jnp.asarray(
+                    state_dict.get("lagrangian_lambda", 0.0), dtype=jnp.float32
+                ),
+                lambda_lr=lambda_lr,
+                cost_limit=cost_limit,
+                lambda_max=lambda_max,
+            )
+
+        try:
+            loaded = serialization.from_bytes(cls, data)
+        except (TypeError, ValueError):
+            loaded = serialization.msgpack_restore(data)
+
         if isinstance(loaded, dict):
             for v in loaded.values():
                 if isinstance(v, cls):
                     return v
+            return _restore_from_state_dict_checkpoint(loaded)
         if not isinstance(loaded, cls):
-            raise TypeError(f"Loaded checkpoint type {type(loaded)} is not TD3LagLearner")
+            return _restore_from_state_dict_checkpoint(
+                serialization.msgpack_restore(data)
+            )
         return loaded
 
     # Manual sanity checklist (informal):
