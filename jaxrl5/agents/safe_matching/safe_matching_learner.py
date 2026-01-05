@@ -641,37 +641,102 @@ class SafeScoreMatchingLearner(Agent):
         )
         return new_agent, metrics
 
-    @jax.jit
-    def sample_actions(self, observations: jnp.ndarray):
-        actions, new_agent = self.eval_actions(observations)
+    def sample_actions(self, observations: jnp.ndarray, guidance_mode: str = "both"):
+        actions, new_agent = self.eval_actions(observations, guidance_mode=guidance_mode)
         key, rng = jax.random.split(new_agent.rng, 2)
         noise = jax.random.normal(key, shape=actions.shape) * 0.1
         actions = jnp.clip(actions + noise, -1.0, 1.0)
         key, rng = jax.random.split(rng, 2)
         return actions, new_agent.replace(rng=rng)
 
-    @jax.jit
-    def eval_actions(self, observations: jnp.ndarray):
+    def _guided_ddpm_sample(
+        self, observations: jnp.ndarray, *, guidance_mode: str = "both"
+    ):
         rng = self.rng
-        assert len(observations.shape) == 1
-        observations = observations[None]
+        batch_obs = observations[None]
+        key, rng = jax.random.split(rng, 2)
+        current_x = jax.random.normal(key, (1, self.act_dim))
 
-        actions, rng = ddpm_sampler(
-            self.score_model.apply_fn,
-            self.score_model.params,
-            self.T,
-            rng,
-            self.act_dim,
-            observations,
-            self.alphas,
-            self.alpha_hats,
-            self.betas,
-            self.ddpm_temperature,
-            self.clip_sampler,
+        def _guidance(noisy_actions: jnp.ndarray):
+            reward_enabled = guidance_mode in ("reward_only", "both")
+            safety_enabled = guidance_mode in ("safety_only", "both")
+            if guidance_mode == "none" or (not reward_enabled and not safety_enabled):
+                return jnp.zeros_like(noisy_actions)
+
+            lam = self._lambda_values(batch_obs)
+            if guidance_mode == "safety_only":
+                lam = jnp.ones_like(lam) * self.safety_lambda
+
+            def _reward_sum(actions):
+                q1 = self.critic_1.apply_fn(
+                    {"params": self.critic_1.params}, batch_obs, actions, training=False
+                )
+                q2 = self.critic_2.apply_fn(
+                    {"params": self.critic_2.params}, batch_obs, actions, training=False
+                )
+                return (q1 + q2).sum() * 0.5
+
+            def _safety_sum(actions):
+                qh = self.safety_critic.apply_fn(
+                    {"params": self.safety_critic.params},
+                    batch_obs,
+                    actions,
+                    training=False,
+                )
+                vh = jnp.maximum(0.0, qh)
+                return vh.sum()
+
+            reward_grad = jax.grad(_reward_sum)(noisy_actions)
+            safety_grad = jax.grad(_safety_sum)(noisy_actions)
+
+            reward_scale = (
+                self.actor_grad_coef * self.M_q if reward_enabled else 0.0
+            )
+            safety_scale = (
+                self.actor_safety_grad_coef
+                * self.safety_grad_scale
+                * lam[:, None]
+                if safety_enabled
+                else 0.0
+            )
+
+            reward_term = reward_scale * reward_grad
+            safety_term = safety_scale * safety_grad
+            return reward_term - safety_term
+
+        for time in range(self.T - 1, -1, -1):
+            input_time = jnp.expand_dims(
+                jnp.array([time]).repeat(current_x.shape[0]), axis=1
+            )
+            eps_pred = self.score_model.apply_fn(
+                {"params": self.score_model.params},
+                batch_obs,
+                current_x,
+                input_time,
+                training=False,
+            )
+
+            eps_pred = eps_pred + _guidance(current_x)
+
+            alpha_1 = 1 / jnp.sqrt(self.alphas[time])
+            alpha_2 = (1 - self.alphas[time]) / (jnp.sqrt(1 - self.alpha_hats[time]))
+            current_x = alpha_1 * (current_x - alpha_2 * eps_pred)
+
+            rng, key = jax.random.split(rng, 2)
+            z = jax.random.normal(key, shape=(batch_obs.shape[0], current_x.shape[1]))
+            z_scaled = self.ddpm_temperature * z
+            current_x = current_x + (time > 0) * (jnp.sqrt(self.betas[time]) * z_scaled)
+            if self.clip_sampler:
+                current_x = jnp.clip(current_x, -1.0, 1.0)
+
+        return jnp.squeeze(current_x), self.replace(rng=rng)
+
+    def eval_actions(self, observations: jnp.ndarray, guidance_mode: str = "both"):
+        assert len(observations.shape) == 1
+        actions, new_agent = self._guided_ddpm_sample(
+            observations, guidance_mode=guidance_mode
         )
-        assert actions.shape == (1, self.act_dim)
-        _, rng = jax.random.split(rng, 2)
-        return jnp.squeeze(actions), self.replace(rng=rng)
+        return actions, new_agent
 
     @jax.jit
     def update(self, batch: DatasetDict):
