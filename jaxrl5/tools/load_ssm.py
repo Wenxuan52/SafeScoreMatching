@@ -153,6 +153,7 @@ def load_ssm(
     run_dir: Optional[str] = None,
     deterministic: bool = True,
     ddpm_temperature: Optional[float] = None,
+    guidance_mode: str = "both",
     **kwargs,
 ) -> Tuple[SafeScoreMatchingLearner, PolicyFn, Dict]:
     if observation_space is None or action_space is None:
@@ -218,9 +219,13 @@ def load_ssm(
     def policy_fn(obs: np.ndarray) -> np.ndarray:
         obs_np = np.asarray(obs, dtype=np.float32)
         if deterministic:
-            action, new_agent = state_holder["agent"].eval_actions(obs_np)
+            action, new_agent = state_holder["agent"].eval_actions(
+                obs_np, guidance_mode=guidance_mode
+            )
         else:
-            action, new_agent = state_holder["agent"].sample_actions(obs_np)
+            action, new_agent = state_holder["agent"].sample_actions(
+                obs_np, guidance_mode=guidance_mode
+            )
         state_holder["agent"] = new_agent
         return np.asarray(action, dtype=np.float32)
 

@@ -1,5 +1,6 @@
 import argparse
 import csv
+import json
 import os
 from typing import Dict, List
 
@@ -20,7 +21,27 @@ def _reference_circle(num_points: int = 360):
     return x, z
 
 
-def rollout_episodes(env, policy_fn, episodes: int, deterministic: bool, seed: int, algo: str):
+def _rescale_action_from_unit(action: np.ndarray, action_space) -> np.ndarray:
+    low = np.asarray(action_space.low, dtype=np.float32)
+    high = np.asarray(action_space.high, dtype=np.float32)
+    if np.allclose(low, -1.0) and np.allclose(high, 1.0):
+        return np.asarray(action, dtype=np.float32)
+
+    scale = (high - low) / 2.0
+    bias = (high + low) / 2.0
+    return scale * np.asarray(action, dtype=np.float32) + bias
+
+
+def rollout_episodes(
+    env,
+    policy_fn,
+    episodes: int,
+    deterministic: bool,
+    seed: int,
+    algo: str,
+    guidance_mode: str,
+    run_name: str,
+):
     trajectories: List[List[Dict[str, float]]] = []
     for ep in range(episodes):
         obs, info = env.reset(
@@ -40,7 +61,12 @@ def rollout_episodes(env, policy_fn, episodes: int, deterministic: bool, seed: i
         ep_data: List[Dict[str, float]] = []
         t = 0
         while True:
-            action = policy_fn(obs)
+            policy_out = policy_fn(obs)
+            if isinstance(policy_out, tuple) and len(policy_out) == 2:
+                action, debug = policy_out
+            else:
+                action, debug = policy_out, {}
+
             action = np.clip(action, env.action_space.low, env.action_space.high)
             step_out = env.step(action)
             if len(step_out) == 6:
@@ -51,6 +77,8 @@ def rollout_episodes(env, policy_fn, episodes: int, deterministic: bool, seed: i
             x, z = float(obs[0]), float(obs[2])
             x_ref, z_ref = float(obs[6]), float(obs[8])
             idx = int(info.get("idx", t % 360))
+            raw_action = debug.get("raw_action")
+            env_action = debug.get("env_action", action)
             ep_data.append(
                 {
                     "t": t,
@@ -58,12 +86,16 @@ def rollout_episodes(env, policy_fn, episodes: int, deterministic: bool, seed: i
                     "z": z,
                     "x_ref": x_ref,
                     "z_ref": z_ref,
+                    "raw_action": raw_action.tolist() if raw_action is not None else np.asarray(env_action).tolist(),
+                    "env_action": np.asarray(env_action).tolist(),
                     "reward": float(reward),
                     "cost": float(cost),
                     "h": float(info.get("h", 0.0)),
                     "terminated": bool(terminated),
                     "truncated": bool(truncated),
                     "idx": idx,
+                    "guidance_mode": guidance_mode,
+                    "run_name": run_name,
                 }
             )
             obs = next_obs
@@ -141,6 +173,17 @@ def main():
     parser.add_argument("--save_csv", action="store_true")
     parser.add_argument("--ssm_ddpm_temperature", type=float, default=None, help="Override SSM ddpm_temperature during evaluation")
     parser.add_argument("--config_path", default=None, help="Optional path to SSM config.json/variant.json")
+    parser.add_argument(
+        "--guidance_mode",
+        choices=["none", "reward_only", "safety_only", "both"],
+        default="both",
+        help="Guidance mode for SSM/DDPM policy.",
+    )
+    parser.add_argument(
+        "--run_name",
+        default=None,
+        help="Optional run name used for debug rollout json naming.",
+    )
     args = parser.parse_args()
 
     algo = args.algo if args.algo is not None else (args.agent or "td3")
@@ -152,7 +195,7 @@ def main():
 
     env = make_env(args.env_name, seed=args.seed)
 
-    agent, policy_fn, meta = load_agent(
+    agent, base_policy_fn, meta = load_agent(
         algo,
         ckpt_path,
         step=step,
@@ -162,8 +205,27 @@ def main():
         deterministic=args.deterministic,
         ddpm_temperature=args.ssm_ddpm_temperature,
         config_path=args.config_path,
+        guidance_mode=args.guidance_mode,
     )
     resolved_ckpt = meta.get("ckpt_resolved_path", ckpt_path)
+
+    ssm_state = {"agent": agent}
+
+    def policy_fn(obs: np.ndarray):
+        if algo != "ssm":
+            env_action = base_policy_fn(obs)
+            return env_action, {"raw_action": np.asarray(env_action)}
+
+        raw_action, new_agent = ssm_state["agent"].eval_actions(
+            np.asarray(obs, dtype=np.float32), guidance_mode=args.guidance_mode
+        )
+        ssm_state["agent"] = new_agent
+        env_action = _rescale_action_from_unit(raw_action, env.action_space)
+        env_action = np.clip(env_action, env.action_space.low, env.action_space.high)
+        return env_action, {
+            "raw_action": np.asarray(raw_action, dtype=np.float32),
+            "env_action": np.asarray(env_action, dtype=np.float32),
+        }
 
     trajectories = rollout_episodes(
         env,
@@ -172,15 +234,37 @@ def main():
         deterministic=args.deterministic,
         seed=args.seed,
         algo=algo,
+        guidance_mode=args.guidance_mode,
+        run_name=args.run_name or os.path.basename(resolved_ckpt),
     )
 
     ckpt_label = os.path.basename(resolved_ckpt)
-    out_png = os.path.join(args.out_dir, f"traj_{algo}_{ckpt_label}.png")
+    out_png = os.path.join(
+        args.out_dir, f"traj_{algo}_{ckpt_label}_guidance-{args.guidance_mode}.png"
+    )
     plot_trajectories(trajectories, out_png, algo, ckpt_label)
     print(f"Saved trajectory plot to {out_png}")
 
+    debug_dir = os.path.join("results", "debug_rollouts")
+    os.makedirs(debug_dir, exist_ok=True)
+    debug_path = os.path.join(
+        debug_dir,
+        f"{(args.run_name or ckpt_label)}_{args.guidance_mode}.json",
+    )
+    with open(debug_path, "w", encoding="utf-8") as f:
+        first_episode = trajectories[0] if trajectories else []
+        json_payload = {
+            "guidance_mode": args.guidance_mode,
+            "run_name": args.run_name or ckpt_label,
+            "steps": first_episode[:20],
+        }
+        json.dump(json_payload, f, indent=2)
+    print(f"Saved debug rollout (first 20 steps) to {debug_path}")
+
     if args.save_csv:
-        out_csv = os.path.join(args.out_dir, f"traj_{algo}_{ckpt_label}.csv")
+        out_csv = os.path.join(
+            args.out_dir, f"traj_{algo}_{ckpt_label}_guidance-{args.guidance_mode}.csv"
+        )
         save_csv(trajectories, out_csv)
         print(f"Saved trajectory CSV to {out_csv}")
 

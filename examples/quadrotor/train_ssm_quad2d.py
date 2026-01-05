@@ -99,6 +99,7 @@ def _make_eval_policy(agent: SafeScoreMatchingLearner) -> Callable[[np.ndarray],
     def policy(obs: np.ndarray) -> np.ndarray:
         nonlocal eval_agent
         action, eval_agent = eval_agent.eval_actions(np.asarray(obs, dtype=np.float32))
+        action = _rescale_action_from_unit(action, eval_agent.action_space)
         return np.asarray(action, dtype=np.float32)
 
     return policy
@@ -204,6 +205,19 @@ def _save_checkpoint(agent: SafeScoreMatchingLearner, ckpt_dir: str, step: int) 
     return path
 
 
+def _rescale_action_from_unit(action: np.ndarray, action_space) -> np.ndarray:
+    """Map actions in [-1, 1] to the env's Box bounds."""
+
+    low = np.asarray(action_space.low, dtype=np.float32)
+    high = np.asarray(action_space.high, dtype=np.float32)
+    if np.allclose(low, -1.0) and np.allclose(high, 1.0):
+        return action
+
+    scale = (high - low) / 2.0
+    bias = (high + low) / 2.0
+    return scale * np.asarray(action, dtype=np.float32) + bias
+
+
 def _load_checkpoint(path: str) -> SafeScoreMatchingLearner:
     return SafeScoreMatchingLearner.load(path)
 
@@ -297,6 +311,7 @@ def _training_loop(run_dir: str) -> None:
             action = np.asarray(train_env.action_space.sample(), dtype=np.float32)
         else:
             action, agent = agent.sample_actions(np.asarray(observation, dtype=np.float32))
+            action = _rescale_action_from_unit(action, train_env.action_space)
             action = np.asarray(action, dtype=np.float32)
             action = np.clip(action, train_env.action_space.low, train_env.action_space.high)
 
