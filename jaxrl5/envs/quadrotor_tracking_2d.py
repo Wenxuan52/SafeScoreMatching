@@ -4,6 +4,7 @@ import gymnasium as gym
 import numpy as np
 
 from jaxrl5.envs.dynamics.quad2d import step_dynamics
+from jaxrl5.wrappers.action_rescale import SymmetricActionWrapper
 
 
 class QuadrotorTracking2DEnv(gym.Env):
@@ -59,8 +60,8 @@ class QuadrotorTracking2DEnv(gym.Env):
             "action_high": float(self.action_space.high[0]),
         }
 
-        self.Q = np.diag([10.0, 1.0, 10.0, 1.0, 0.2, 0.2])
-        self.R = np.diag([1e-4, 1e-4])
+        self.Q = np.diag([10.0, 5.0, 10.0, 5.0, 0.2, 0.2])  # [10.0, 1.0, 10.0, 1.0, 0.2, 0.2]
+        self.R = np.diag([1e-2, 1e-2])  # [1e-4, 1e-4]
         # Hover reference action in normalized units.
         self.a_ref = np.array([0.5, 0.5], dtype=np.float32)
 
@@ -84,8 +85,8 @@ class QuadrotorTracking2DEnv(gym.Env):
         if seed is not None:
             self.seed(seed)
 
-        low = np.array([-1.5, -1.0, 0.50, -1.5, -0.2, -0.1], dtype=np.float32)
-        high = np.array([ 1.5,  1.0, 1.50,  1.5,  0.2,  0.1], dtype=np.float32)
+        low = np.array([-1.5, -1.0, 0.25, -1.5, -0.2, -0.1], dtype=np.float32)
+        high = np.array([ 1.5,  1.0, 1.75,  1.5,  0.2,  0.1], dtype=np.float32)
 
 
         # 1) 先按原逻辑随机初始化
@@ -156,8 +157,10 @@ class QuadrotorTracking2DEnv(gym.Env):
 
         x = float(self.state[0])
         z = float(self.state[2])
+        out_of_bounds = (abs(x) > 2.0) or (abs(z) > 3.0)
         h = max(0.5 - z, z - 1.5)
-        cost = float(h > 0.0)
+        # cost = float(h > 0.0)
+        cost = float((h > 0.0) or out_of_bounds)
 
         terminated = bool(abs(x) > 2.0 or abs(z) > 3.0)
         self._t += 1
@@ -173,5 +176,10 @@ class QuadrotorTracking2DEnv(gym.Env):
         return obs, reward, terminated, truncated, info
 
 
-def make_quadrotor_tracking_2d_env(**kwargs) -> QuadrotorTracking2DEnv:
-    return QuadrotorTracking2DEnv(**kwargs)
+# def make_quadrotor_tracking_2d_env(**kwargs) -> QuadrotorTracking2DEnv:
+#     return QuadrotorTracking2DEnv(**kwargs)
+
+def make_quadrotor_tracking_2d_env(**kwargs) -> gym.Env:
+    env = QuadrotorTracking2DEnv(**kwargs)
+    env = SymmetricActionWrapper(env)
+    return env

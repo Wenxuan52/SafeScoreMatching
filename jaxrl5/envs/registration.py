@@ -15,5 +15,5 @@ def ensure_custom_envs_registered() -> None:
     except gym.error.Error:
         register(
             id=_CUSTOM_ENV_ID,
-            entry_point="jaxrl5.envs.quadrotor_tracking_2d:QuadrotorTracking2DEnv",
+            entry_point="jaxrl5.envs.quadrotor_tracking_2d:make_quadrotor_tracking_2d_env",
         )

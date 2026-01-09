@@ -588,6 +588,8 @@ class SafeScoreMatchingLearner(Agent):
             * (lam_sg[:, None] * agent.safety_grad_scale * safety_jacobian)
         )
 
+        # phi = agent.M_q * critic_jacobian - (agent.safe_lagrange_coef * agent.safety_grad_scale) * safety_jacobian
+
         def actor_loss_fn(score_model_params):
             eps_pred = agent.score_model.apply_fn(
                 {"params": score_model_params},
