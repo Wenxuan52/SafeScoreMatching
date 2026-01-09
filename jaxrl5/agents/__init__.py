@@ -1,5 +1,5 @@
 from jaxrl5.agents.bc.bc_learner import BCLearner
-from jaxrl5.agents.cal.agent import CALAgent
+from jaxrl5.agents.cal.cal_learner import CALAgent
 from jaxrl5.agents.drq.drq_learner import DrQLearner
 from jaxrl5.agents.iql.iql_learner import IQLLearner
 from jaxrl5.agents.pixel_bc.pixel_bc_learner import PixelBCLearner
