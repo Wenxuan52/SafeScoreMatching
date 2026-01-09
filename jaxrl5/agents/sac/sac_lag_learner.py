@@ -420,17 +420,20 @@ class SACLagLearner(Agent):
         """Load a learner checkpoint from disk."""
         with open(path, "rb") as f:
             data = f.read()
+        restored = None
         if hasattr(serialization, "msgpack_restore"):
             restored = serialization.msgpack_restore(data)
-        else:
-            restored = serialization.from_bytes(cls, data)
+            if isinstance(restored, cls):
+                return restored
+            if isinstance(restored, dict):
+                for value in restored.values():
+                    if isinstance(value, cls):
+                        return value
 
-        if isinstance(restored, cls):
-            return restored
-        if isinstance(restored, dict):
-            for value in restored.values():
-                if isinstance(value, cls):
-                    return value
-        raise TypeError(
-            f"Loaded checkpoint type {type(restored)} is not {cls.__name__} or a container of it"
-        )
+        try:
+            return serialization.from_bytes(cls, data)
+        except Exception as exc:
+            restored_type = type(restored) if restored is not None else None
+            raise TypeError(
+                f"Loaded checkpoint type {restored_type} is not {cls.__name__} or a container of it"
+            ) from exc
