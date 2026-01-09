@@ -114,25 +114,25 @@ def _make_env(env_name: str, seed: int, allow_video: bool = True):
 
     env = make_env(env_name, seed=seed)
 
-    if (not _DEBUG_ENV_PRINTED) and (env_name == "QuadrotorTracking2D-v0"):
-        print("[debug] env type:", type(env))
-        print("[debug] wrapped action_space low/high:", env.action_space.low, env.action_space.high)
+    # if (not _DEBUG_ENV_PRINTED) and (env_name == "QuadrotorTracking2D-v0"):
+    #     print("[debug] env type:", type(env))
+    #     print("[debug] wrapped action_space low/high:", env.action_space.low, env.action_space.high)
 
-        try:
-            print(
-                "[debug] unwrapped action_space low/high:",
-                env.unwrapped.action_space.low,
-                env.unwrapped.action_space.high,
-            )
-        except Exception as exc:
-            print("[debug] cannot access unwrapped action_space:", exc)
+    #     try:
+    #         print(
+    #             "[debug] unwrapped action_space low/high:",
+    #             env.unwrapped.action_space.low,
+    #             env.unwrapped.action_space.high,
+    #         )
+    #     except Exception as exc:
+    #         print("[debug] cannot access unwrapped action_space:", exc)
 
-        obs, _ = env.reset(seed=seed)
-        out = env.step(env.action_space.sample())
-        print("[debug] step return len:", len(out))
-        env.reset(seed=seed)
+    #     obs, _ = env.reset(seed=seed)
+    #     out = env.step(env.action_space.sample())
+    #     print("[debug] step return len:", len(out))
+    #     env.reset(seed=seed)
 
-        _DEBUG_ENV_PRINTED = True
+    #     _DEBUG_ENV_PRINTED = True
 
     if allow_video and FLAGS.wandb and FLAGS.save_video:
         env = WANDBVideo(env)
