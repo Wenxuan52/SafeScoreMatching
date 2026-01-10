@@ -14,27 +14,42 @@ conda activate jaxrl
 
 # cd examples
 
-# python examples/quadrotor/train_td3_quad2d_baseline.py \
+# python examples/quadrotor/train_ssm_quad2d.py \
+#   --mode training \
 #   --env_name QuadrotorTracking2D-v0 \
-#   --seed 0 \
+#   --seed 1 \
 #   --max_steps 2010000 \
 #   --start_training 10000 \
 #   --eval_interval 50000 \
 #   --eval_episodes 4 \
-#   --batch_size 256 \
+#   --batch_size 512 \
 #   --utd_ratio 1 \
 #   --save_interval 50000 \
 #   --wandb False
 
-python examples/quadrotor/train_ssm_quad2d.py \
-  --mode training \
+# python examples/quadrotor/train_sac_lag_quad2d.py \
+#   --env_name QuadrotorTracking2D-v0 \
+#   --seed 0 \
+#   --max_steps 2000 \
+#   --start_training 200 \
+#   --eval_interval 500 \
+#   --eval_episodes 2 \
+#   --save_interval 500 \
+#   --batch_size 256 \
+#   --utd_ratio 1 \
+#   --wandb False \
+#   --config examples/quadrotor/configs/sac_lag_quad2d_config.py
+
+
+python examples/quadrotor/train_cal_quad2d.py \
   --env_name QuadrotorTracking2D-v0 \
-  --seed 1 \
-  --max_steps 2010000 \
-  --start_training 10000 \
-  --eval_interval 50000 \
-  --eval_episodes 4 \
-  --batch_size 512 \
+  --seed 0 \
+  --max_steps 2000 \
+  --start_training 200 \
+  --eval_interval 500 \
+  --eval_episodes 2 \
+  --save_interval 500 \
+  --batch_size 256 \
   --utd_ratio 1 \
-  --save_interval 50000 \
-  --wandb False
+  --wandb False \
+  --config examples/quadrotor/configs/cal_quad2d_config.py
