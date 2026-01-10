@@ -4,6 +4,7 @@ import tempfile
 
 import gymnasium as gym
 import numpy as np
+from flax import serialization
 
 from jaxrl5.agents.sac.sac_lag_learner import SACLagLearner
 
@@ -87,7 +88,18 @@ def main() -> None:
     with tempfile.TemporaryDirectory() as tmpdir:
         ckpt_path = f"{tmpdir}/ckpt.msgpack"
         new_agent.save(ckpt_path)
-        loaded = SACLagLearner.load(ckpt_path)
+
+        state_dict = SACLagLearner.load(ckpt_path)  # dict: keys like actor/critic/rng/...
+
+        loaded = SACLagLearner.create(
+            seed=0,
+            observation_space=observation_space,
+            action_space=action_space,
+            hidden_dims=(32, 32),
+        )
+        loaded = serialization.from_state_dict(loaded, state_dict)
+        # ------------------------------------------------------------
+
         loaded_action, _ = loaded.eval_actions(single_obs)
 
     np.testing.assert_allclose(

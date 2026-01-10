@@ -1,4 +1,4 @@
-from jaxrl5.agents.cal.agent import CALAgent
+from jaxrl5.agents.cal.cal_learner import CALAgent
 
 __all__ = ["CALAgent"]
 
