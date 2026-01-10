@@ -1,5 +1,6 @@
 from typing import Any, Callable, Dict, Optional, Tuple
 
+from jaxrl5.tools.load_cal import load_cal
 from jaxrl5.tools.load_ssm import load_ssm
 from jaxrl5.tools.load_td3 import load_td3
 from jaxrl5.tools.load_td3_lag import load_td3_lag
@@ -16,6 +17,10 @@ def load_agent(
         return load_td3(ckpt_path, step=step)
     if algo == "td3_lag":
         return load_td3_lag(ckpt_path, step=step)
+    if algo == "cal":
+        return load_cal(ckpt_path, step=step, **kwargs)
     if algo == "ssm":
         return load_ssm(ckpt_path, step=step, **kwargs)
-    raise ValueError(f"Unsupported algo '{algo}'. Expected one of: td3, td3_lag, ssm")
+    raise ValueError(
+        f"Unsupported algo '{algo}'. Expected one of: td3, td3_lag, cal, ssm"
+    )
