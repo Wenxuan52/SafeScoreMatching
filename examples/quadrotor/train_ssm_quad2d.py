@@ -106,27 +106,27 @@ def _make_env(env_name: str, seed: int, allow_video: bool = True):
 
     env = make_env(env_name, seed=seed)
 
-    # 只打印一次，避免刷屏
-    if (not _DEBUG_ENV_PRINTED) and (env_name == "QuadrotorTracking2D-v0"):
-        print("[debug] env type:", type(env))
-        print("[debug] wrapped action_space low/high:", env.action_space.low, env.action_space.high)
+    # # 只打印一次，避免刷屏
+    # if (not _DEBUG_ENV_PRINTED) and (env_name == "QuadrotorTracking2D-v0"):
+    #     print("[debug] env type:", type(env))
+    #     print("[debug] wrapped action_space low/high:", env.action_space.low, env.action_space.high)
 
-        # unwrapped 是底层原始环境（不带 wrapper）
-        try:
-            print("[debug] unwrapped action_space low/high:",
-                  env.unwrapped.action_space.low, env.unwrapped.action_space.high)
-        except Exception as e:
-            print("[debug] cannot access unwrapped action_space:", e)
+    #     # unwrapped 是底层原始环境（不带 wrapper）
+    #     try:
+    #         print("[debug] unwrapped action_space low/high:",
+    #               env.unwrapped.action_space.low, env.unwrapped.action_space.high)
+    #     except Exception as e:
+    #         print("[debug] cannot access unwrapped action_space:", e)
 
-        # 顺便测一下 step 返回值长度（你代码里用的是 6 个返回值）
-        obs, _ = env.reset(seed=seed)
-        out = env.step(env.action_space.sample())
-        print("[debug] step return len:", len(out))
+    #     # 顺便测一下 step 返回值长度（你代码里用的是 6 个返回值）
+    #     obs, _ = env.reset(seed=seed)
+    #     out = env.step(env.action_space.sample())
+    #     print("[debug] step return len:", len(out))
 
-        # 复位一下，不影响训练起点
-        env.reset(seed=seed)
+    #     # 复位一下，不影响训练起点
+    #     env.reset(seed=seed)
 
-        _DEBUG_ENV_PRINTED = True
+    #     _DEBUG_ENV_PRINTED = True
 
     if allow_video and FLAGS.wandb and FLAGS.save_video:
         env = WANDBVideo(env)
