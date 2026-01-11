@@ -56,7 +56,7 @@ class RACLearner(Agent):
     target_entropy: float
     lambda_max: float
     safety_threshold: float
-    update_step: int = struct.field(pytree_node=False)
+    update_step: jnp.ndarray
     num_qs: int = struct.field(pytree_node=False)
     num_min_qs: Optional[int] = struct.field(pytree_node=False)
     policy_update_period: int = struct.field(pytree_node=False)
@@ -171,7 +171,7 @@ class RACLearner(Agent):
             target_entropy=target_entropy,
             lambda_max=lambda_max,
             safety_threshold=safety_threshold,
-            update_step=0,
+            update_step=jnp.array(0, dtype=jnp.int32),
             num_qs=num_qs,
             num_min_qs=num_min_qs,
             policy_update_period=policy_update_period,
@@ -396,32 +396,92 @@ class RACLearner(Agent):
 
         return self.replace(lambda_net=lambda_net, rng=rng), info
 
-    def update(self, batch: DatasetDict) -> Tuple["RACLearner", Dict[str, float]]:
-        step = self.update_step + 1
-        agent = self.replace(update_step=step)
+    def _zeros_like_metrics(self) -> Dict[str, jnp.ndarray]:
+        # 固定结构的“空指标”，用于 lax.cond 的 skip 分支
+        z = lambda: jnp.array(0.0, dtype=jnp.float32)
+        alpha = self.temp.apply_fn({"params": self.temp.params}).astype(jnp.float32)
+        return {
+            # critic
+            "critic_loss": z(),
+            "q1_mean": z(),
+            "q2_mean": z(),
+            "target_q_mean": z(),
+            # safety critic
+            "safety_critic_loss": z(),
+            "qh_mean": z(),
+            "target_qh_mean": z(),
+            "h_mean": z(),
+            # actor
+            "actor_loss": z(),
+            "entropy": z(),
+            "logp_mean": z(),
+            "alpha": alpha,  # 这个保留真实 alpha，避免全是 0
+            # temperature
+            "temperature_loss": z(),
+            # lambda
+            "lambda_mean": z(),
+            "lambda_max": jnp.asarray(self.lambda_max, dtype=jnp.float32),
+        }
 
+    @staticmethod
+    @jax.jit
+    def _update_jit(agent: "RACLearner", batch: DatasetDict) -> Tuple["RACLearner", Dict[str, jnp.ndarray]]:
+        # 1) step++
+        step = agent.update_step + jnp.array(1, dtype=jnp.int32)
+        agent = agent.replace(update_step=step)
+
+        # 2) always update critics
         agent, critic_info = agent.update_critic(batch)
         agent, safety_info = agent.update_safety_critic(batch)
 
-        actor_info = {}
-        temp_info = {}
-        if step % self.policy_update_period == 0:
-            agent, actor_info = agent.update_actor(batch)
-            agent, temp_info = agent.update_temperature(actor_info["entropy"])
+        # 3) policy (actor + temp) periodic update via lax.cond
+        zeros = agent._zeros_like_metrics()
 
-        lambda_info = {}
-        if step % self.multiplier_update_period == 0:
-            agent, lambda_info = agent.update_multiplier(batch)
+        def do_policy(a: "RACLearner"):
+            a, actor_info = a.update_actor(batch)
+            a, temp_info = a.update_temperature(actor_info["entropy"])
+            # 保证返回结构稳定
+            merged = dict(zeros)
+            merged.update(actor_info)
+            merged.update(temp_info)
+            return a, merged
 
-        metrics = {
-            **critic_info,
-            **safety_info,
-            **actor_info,
-            **temp_info,
-            **lambda_info,
-            "violation_mean": jnp.asarray(batch["costs"]).mean(),
-        }
+        def skip_policy(a: "RACLearner"):
+            # 不更新，返回 zeros 中的 actor/temp 部分
+            merged = dict(zeros)
+            return a, merged
+
+        do_pol = (step % agent.policy_update_period) == 0
+        agent, pol_info = jax.lax.cond(do_pol, do_policy, skip_policy, agent)
+
+        # 4) multiplier periodic update via lax.cond
+        def do_lambda(a: "RACLearner"):
+            a, lam_info = a.update_multiplier(batch)
+            merged = dict(zeros)
+            merged.update(lam_info)
+            return a, merged
+
+        def skip_lambda(a: "RACLearner"):
+            merged = dict(zeros)
+            return a, merged
+
+        do_lam = (step % agent.multiplier_update_period) == 0
+        agent, lam_info = jax.lax.cond(do_lam, do_lambda, skip_lambda, agent)
+
+        # 5) merge metrics (固定 key，不会因为分支变化导致 jit 不稳定)
+        metrics = dict(zeros)
+        metrics.update(critic_info)
+        metrics.update(safety_info)
+
+        # policy info / lambda info 只覆盖它们负责的字段（其余保持 zeros）
+        metrics.update(pol_info)
+        metrics.update(lam_info)
+
+        metrics["violation_mean"] = jnp.asarray(batch["costs"]).mean().astype(jnp.float32)
         return agent, metrics
+
+    def update(self, batch: DatasetDict) -> Tuple["RACLearner", Dict[str, jnp.ndarray]]:
+        return self._update_jit(self, batch)
 
     def save(self, path: str) -> None:
         """Serialize the learner to a file using Flax msgpack."""

@@ -110,44 +110,62 @@ def load_cal(
         agent = direct_agent
     else:
         data = Path(resolved).read_bytes()
-        # Prefer from_bytes first (works for direct msgpack serialization).
-        try:
-            agent = serialization.from_bytes(CALAgent, data)
-        except Exception:
-            state = None
-            if hasattr(serialization, "msgpack_restore"):
-                state = serialization.msgpack_restore(data)
 
-            if isinstance(state, CALAgent):
-                agent = state
-            elif isinstance(state, (dict, frozen_dict.FrozenDict)):
-                resolved_run_dir = (
-                    Path(run_dir) if run_dir is not None else Path(resolved).parent.parent
-                )
-                try:
-                    config_path_used = (
-                        Path(config_path)
-                        if config_path is not None
-                        else _find_config_path(resolved_run_dir)
-                    )
-                    cfg_dict = _extract_config(_load_config(config_path_used))
-                except FileNotFoundError:
-                    cfg_dict = {}
+        # 1) restore 原始内容（通常是 state_dict / FrozenDict）
+        state = None
+        if hasattr(serialization, "msgpack_restore"):
+            state = serialization.msgpack_restore(data)
+        else:
+            # 极少数版本没有 msgpack_restore 时可以直接 raise 或自己处理
+            raise RuntimeError("flax.serialization.msgpack_restore not found")
 
-                filtered_cfg = _filter_create_kwargs(cfg_dict)
-                # Allow explicit kwargs to override when config isn't available.
-                filtered_cfg.update(_filter_create_kwargs(kwargs))
-                template = CALAgent.create(
-                    seed=seed,
-                    observation_space=observation_space,
-                    action_space=action_space,
-                    **filtered_cfg,
-                )
-                agent = serialization.from_state_dict(template, state)
+        # 2) 如果直接就是 CALAgent（很少见），直接用
+        if isinstance(state, CALAgent):
+            agent = state
+
+        # 3) 如果是 state_dict，就必须先造 template 再 from_state_dict
+        elif isinstance(state, (dict, frozen_dict.FrozenDict)):
+            # ------- 更鲁棒的 run_dir 推断：先看同级，再看 parent.parent -------
+            resolved_path = Path(resolved)
+            candidate_dirs = []
+            if run_dir is not None:
+                candidate_dirs.append(Path(run_dir))
+            candidate_dirs.append(resolved_path.parent)         # 适配你的 smoke test（ckpt 直接放 tmpdir）
+            candidate_dirs.append(resolved_path.parent.parent)  # 适配常见结构 run_dir/checkpoints/ckpt_xxx
+
+            cfg_dict = {}
+            config_path_used = None
+            if config_path is not None:
+                config_path_used = Path(config_path)
+                cfg_dict = _extract_config(_load_config(config_path_used))
             else:
-                raise TypeError(
-                    f"Loaded checkpoint type {type(state)} is not CALAgent or a container of it"
-                )
+                for d in candidate_dirs:
+                    try:
+                        config_path_used = _find_config_path(d)
+                        cfg_dict = _extract_config(_load_config(config_path_used))
+                        break
+                    except FileNotFoundError:
+                        continue
+
+            filtered_cfg = _filter_create_kwargs(cfg_dict)
+            # 允许调用者 kwargs 覆盖（比如 hidden_dims）
+            filtered_cfg.update(_filter_create_kwargs(kwargs))
+
+            template = CALAgent.create(
+                seed=seed,
+                observation_space=observation_space,
+                action_space=action_space,
+                **filtered_cfg,
+            )
+            agent = serialization.from_state_dict(template, state)
+
+        else:
+            raise TypeError(f"Loaded checkpoint type {type(state)} is not CALAgent or state_dict")
+
+        # 4) 最后加一道硬检查，避免 silent fail
+        if not isinstance(agent, CALAgent):
+            raise TypeError(f"load_cal produced {type(agent)} instead of CALAgent")
+
 
     state_holder = {"agent": agent}
     policy_fn = _build_policy_fn(state_holder, deterministic=deterministic)

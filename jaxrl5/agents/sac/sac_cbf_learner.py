@@ -277,55 +277,205 @@ class SACCbfLearner(Agent):
         if observations.ndim == 1:
             return observations[None], True
         return observations, False
+    
+    @staticmethod
+    @jax.jit
+    def _sac_update_jit(agent, batch):
+        agent, critic_info = agent.update_critic(batch)
+        agent, actor_info = agent.update_actor(batch)
+        agent, temp_info = agent.update_temperature(actor_info["entropy"])
+        metrics = {**critic_info, **actor_info, **temp_info}
+        return agent, metrics
+
+    @staticmethod
+    @partial(jax.jit, static_argnames=("cbf_max_iters", "z_index", "cbf_enabled"))
+    def _cbf_correct_batch_jax(
+        observations: jnp.ndarray,   # (B, obs_dim)
+        actions_nom: jnp.ndarray,    # (B, act_dim)
+        *,
+        cbf_enabled: bool,
+        cbf_mu: float,
+        cbf_dt: float,
+        cbf_grad_eps: float,
+        cbf_shrink_factor: float,
+        z_min: float,
+        z_max: float,
+        z_index: int,
+        dyn_m: float,
+        dyn_I: float,
+        dyn_g: float,
+        thrust_scale: float,
+        torque_scale: float,
+        action_low: float,
+        action_high: float,
+        cbf_max_iters: int,
+    ):
+        """
+        JAX版：对一个 batch 的 nominal actions 做 CBF 修正 + 统计。
+        返回:
+          safe_actions: (B, act_dim)
+          residual_nom_mean, residual_safe_mean, success_rate, delta_action_mean
+        """
+
+        # --- helpers (all jnp) ---
+        def action_to_env(a_ext):
+            a = jnp.clip(a_ext, -1.0, 1.0)
+            a01 = (a + 1.0) * 0.5
+            return action_low + a01 * (action_high - action_low)
+
+        def h_value(z):
+            # max(z_min - z, z - z_max, 0)
+            return jnp.maximum(jnp.maximum(z_min - z, z - z_max), 0.0)
+
+        def cbf_residual(obs, a_ext):
+            # obs: (obs_dim,), a_ext: (act_dim,)
+            state = obs[:6]
+            z = state[z_index]
+            h_curr = h_value(z)
+
+            params = {
+                "m": dyn_m,
+                "I": dyn_I,
+                "g": dyn_g,
+                "thrust_scale": thrust_scale,
+                "torque_scale": torque_scale,
+                "action_low": action_low,
+                "action_high": action_high,
+            }
+            a_env = action_to_env(a_ext)
+
+            # 关键：step_dynamics 必须是 jnp 实现、可 jit/grad
+            next_state = step_dynamics(state, a_env, cbf_dt, params)
+
+            z_next = next_state[z_index]
+            h_next = h_value(z_next)
+            decay = jnp.maximum(0.0, 1.0 - cbf_mu * cbf_dt)
+            return h_next - decay * h_curr  # scalar
+
+        # grad wrt action
+        cbf_grad = jax.grad(lambda ob, ac: cbf_residual(ob, ac), argnums=1)
+
+        def correct_one(obs, a_nom):
+            a0 = jnp.clip(a_nom, -1.0, 1.0)
+            r0 = cbf_residual(obs, a0)
+
+            def do_correct(_):
+                # fixed-iter loop with masking stop
+                def body(_, carry):
+                    a, r, iters = carry
+                    safe = r <= 0.0
+
+                    g = cbf_grad(obs, a)
+                    grad_norm = jnp.linalg.norm(g)
+
+                    def shrink(a_in):
+                        return jnp.clip(a_in * cbf_shrink_factor, -1.0, 1.0)
+
+                    def step_update(a_in):
+                        denom = grad_norm**2 + cbf_grad_eps
+                        step = (r / denom) * g
+                        return jnp.clip(a_in - step, -1.0, 1.0)
+
+                    a_new = jax.lax.cond(grad_norm < cbf_grad_eps, shrink, step_update, a)
+                    r_new = cbf_residual(obs, a_new)
+
+                    # once safe, freeze
+                    a_out = jax.lax.select(safe, a, a_new)
+                    r_out = jax.lax.select(safe, r, r_new)
+
+                    # count only if we actually tried an update
+                    iters_out = iters + jnp.where(safe, 0, 1)
+                    return (a_out, r_out, iters_out)
+
+                aT, rT, itT = jax.lax.fori_loop(
+                    0, cbf_max_iters, body, (a0, r0, jnp.array(0, dtype=jnp.int32))
+                )
+                return aT, rT, itT
+
+            # If already safe, no correction
+            a_safe, r_safe, iters = jax.lax.cond(r0 <= 0.0, lambda _: (a0, r0, jnp.array(0, jnp.int32)), do_correct, operand=None)
+
+            delta = jnp.linalg.norm(a_safe - a0)
+            success = (r_safe <= 0.0).astype(jnp.float32)
+            return a_safe, r0, r_safe, success, delta, iters.astype(jnp.float32)
+
+        # If disabled: return nominal quickly
+        if not cbf_enabled:
+            B = actions_nom.shape[0]
+            safe_actions = jnp.clip(actions_nom, -1.0, 1.0)
+            zeros = jnp.array(0.0, dtype=jnp.float32)
+            ones = jnp.array(1.0, dtype=jnp.float32)
+            return safe_actions, zeros, zeros, ones, zeros
+
+        # vmap over batch
+        safe_actions, r_nom, r_safe, succ, delta, iters = jax.vmap(correct_one)(observations, actions_nom)
+
+        # metrics
+        return (
+            safe_actions.astype(jnp.float32),
+            jnp.mean(r_nom).astype(jnp.float32),
+            jnp.mean(r_safe).astype(jnp.float32),
+            jnp.mean(succ).astype(jnp.float32),
+            jnp.mean(delta).astype(jnp.float32),
+        )
 
     def _apply_cbf_batch(
-        self, observations: np.ndarray, actions: np.ndarray
-    ) -> Tuple[np.ndarray, Dict[str, float]]:
-        if not self.cbf_enabled:
-            return actions, {
-                "cbf/residual_nom_mean": 0.0,
-                "cbf/residual_safe_mean": 0.0,
-                "cbf/success_rate": 1.0,
-                "cbf/delta_action_mean": 0.0,
-            }
+        self, observations, actions
+    ):
+        """
+        替换原来的 numpy+python loop 版本：
+        - 输入可以是 np 或 jnp
+        - 内部统一转 jnp，在 device 上做 jit/vmap
+        - 返回 safe_actions(np) + metrics(dict of float)
+        """
+        obs_j = jnp.asarray(observations, dtype=jnp.float32)
+        act_j = jnp.asarray(actions, dtype=jnp.float32)
 
-        residual_nom = []
-        residual_safe = []
-        deltas = []
-        successes = []
-        safe_actions = []
+        safe_j, rnom_m, rsafe_m, succ_m, delta_m = self._cbf_correct_batch_jax(
+            obs_j,
+            act_j,
+            cbf_enabled=bool(self.cbf_enabled),
+            cbf_mu=float(self.cbf_mu),
+            cbf_dt=float(self.cbf_dt),
+            cbf_grad_eps=float(self.cbf_grad_eps),
+            cbf_shrink_factor=float(self.cbf_shrink_factor),
+            z_min=float(self.z_min),
+            z_max=float(self.z_max),
+            z_index=int(self.z_index),
+            dyn_m=float(self.dyn_m),
+            dyn_I=float(self.dyn_I),
+            dyn_g=float(self.dyn_g),
+            thrust_scale=float(self.thrust_scale),
+            torque_scale=float(self.torque_scale),
+            action_low=float(self.action_low),
+            action_high=float(self.action_high),
+            cbf_max_iters=int(self.cbf_max_iters),
+        )
 
-        for obs, act in zip(observations, actions):
-            a_safe, info = self._cbf_correct_action(obs, act)
-            safe_actions.append(a_safe)
-            residual_nom.append(info["residual_nom"])
-            residual_safe.append(info["residual_safe"])
-            successes.append(info["success"])
-            deltas.append(info["delta"])
-
+        # materialize to host once
+        safe_actions = np.asarray(jax.device_get(safe_j), dtype=np.float32)
         metrics = {
-            "cbf/residual_nom_mean": float(np.mean(residual_nom)),
-            "cbf/residual_safe_mean": float(np.mean(residual_safe)),
-            "cbf/success_rate": float(np.mean(successes)),
-            "cbf/delta_action_mean": float(np.mean(deltas)),
+            "cbf/residual_nom_mean": float(jax.device_get(rnom_m)),
+            "cbf/residual_safe_mean": float(jax.device_get(rsafe_m)),
+            "cbf/success_rate": float(jax.device_get(succ_m)),
+            "cbf/delta_action_mean": float(jax.device_get(delta_m)),
         }
-        return np.asarray(safe_actions, dtype=np.float32), metrics
+        return safe_actions, metrics
 
     def sample_actions(self, observations: jnp.ndarray):
         obs, single = self._format_obs(observations)
         key, rng = jax.random.split(self.rng)
-        actions, _ = self._nominal_actions(obs, key)
-        actions_np = np.asarray(actions, dtype=np.float32)
-        safe_actions, _ = self._apply_cbf_batch(np.asarray(obs), actions_np)
+        actions, _ = self._nominal_actions(obs, key)  # jnp
+        # JAX batch CBF correction (size 1 or B)
+        safe_actions, _ = self._apply_cbf_batch(obs, actions)
         if single:
             safe_actions = safe_actions[0]
         return safe_actions, self.replace(rng=rng)
 
     def eval_actions(self, observations: jnp.ndarray):
         obs, single = self._format_obs(observations)
-        actions = self._eval_nominal_actions(obs)
-        actions_np = np.asarray(actions, dtype=np.float32)
-        safe_actions, _ = self._apply_cbf_batch(np.asarray(obs), actions_np)
+        actions = self._eval_nominal_actions(obs)  # jnp
+        safe_actions, _ = self._apply_cbf_batch(obs, actions)
         if single:
             safe_actions = safe_actions[0]
         return safe_actions, self
@@ -435,18 +585,15 @@ class SACCbfLearner(Agent):
 
         return self.replace(critic=critic, target_critic=target_critic, rng=rng), info
 
-    def update(self, batch: DatasetDict) -> Tuple["SACCbfLearner", Dict[str, float]]:
-        new_agent, critic_info = self.update_critic(batch)
-        new_agent, actor_info = new_agent.update_actor(batch)
-        new_agent, temp_info = new_agent.update_temperature(actor_info["entropy"])
+    def update(self, batch):
+        new_agent, metrics = self._sac_update_jit(self, batch)
 
-        obs_np = np.asarray(batch["observations"], dtype=np.float32)
-        nominal_actions = np.asarray(
-            new_agent._eval_nominal_actions(batch["observations"]), dtype=np.float32
-        )
-        _, cbf_info = new_agent._apply_cbf_batch(obs_np, nominal_actions)
+        # CBF metrics：建议子采样，否则依旧很贵
+        obs_for_cbf = batch["observations"][:16]
+        act_for_cbf = new_agent._eval_nominal_actions(obs_for_cbf)
+        _, cbf_info = new_agent._apply_cbf_batch(obs_for_cbf, act_for_cbf)
 
-        metrics = {**critic_info, **actor_info, **temp_info, **cbf_info}
+        metrics = {**metrics, **cbf_info}
         return new_agent, metrics
 
     def save(self, path: str) -> None:

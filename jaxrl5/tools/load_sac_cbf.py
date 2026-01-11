@@ -94,6 +94,16 @@ def load_sac_cbf(
     deterministic: bool = True,
     **kwargs,
 ) -> Tuple[SACCbfLearner, PolicyFn, Dict]:
+    """
+    Load a SACCbfLearner checkpoint and return (agent, policy_fn, meta).
+
+    This loader is robust to:
+      - checkpoints saved via `agent.save(path)` (msgpack bytes)
+      - checkpoints that restore to a state_dict (dict/FrozenDict)
+
+    It avoids `serialization.from_bytes(SACCbfLearner, data)` because passing a class
+    (instead of a template instance) can yield a raw dict and break `.eval_actions()`.
+    """
     if observation_space is None or action_space is None:
         raise ValueError(
             "load_sac_cbf requires observation_space and action_space to build a template agent."
@@ -101,7 +111,7 @@ def load_sac_cbf(
 
     resolved = resolve_checkpoint(ckpt_path, step)
 
-    # Prefer direct class loader if available.
+    # 0) Prefer direct class loader if available (fast path)
     direct_agent = None
     if hasattr(SACCbfLearner, "load"):
         try:
@@ -110,52 +120,76 @@ def load_sac_cbf(
             direct_agent = None
 
     config_path_used: Optional[Path] = None
+
     if isinstance(direct_agent, SACCbfLearner):
-        agent = direct_agent
+        agent: SACCbfLearner = direct_agent
     else:
+        # 1) Read raw bytes, restore to python object/state_dict
         data = Path(resolved).read_bytes()
-        # Prefer from_bytes first (works for direct msgpack serialization).
-        try:
-            agent = serialization.from_bytes(SACCbfLearner, data)
-        except Exception:
-            state = None
-            if hasattr(serialization, "msgpack_restore"):
-                state = serialization.msgpack_restore(data)
 
-            if isinstance(state, SACCbfLearner):
-                agent = state
-            elif isinstance(state, (dict, frozen_dict.FrozenDict)):
-                resolved_run_dir = (
-                    Path(run_dir) if run_dir is not None else Path(resolved).parent.parent
-                )
-                try:
-                    config_path_used = (
-                        Path(config_path)
-                        if config_path is not None
-                        else _find_config_path(resolved_run_dir)
-                    )
-                    cfg_dict = _extract_config(_load_config(config_path_used))
-                except FileNotFoundError:
-                    cfg_dict = {}
+        if not hasattr(serialization, "msgpack_restore"):
+            raise RuntimeError(
+                "flax.serialization.msgpack_restore not found; cannot restore checkpoint bytes."
+            )
 
-                filtered_cfg = _filter_create_kwargs(cfg_dict)
-                filtered_cfg.update(_filter_create_kwargs(kwargs))
-                template = SACCbfLearner.create(
-                    seed=seed,
-                    observation_space=observation_space,
-                    action_space=action_space,
-                    **filtered_cfg,
-                )
-                agent = serialization.from_state_dict(template, state)
+        state = serialization.msgpack_restore(data)
+
+        # 2) If the checkpoint restores directly to a Learner (rare), use it
+        if isinstance(state, SACCbfLearner):
+            agent = state
+
+        # 3) Typical: restores to a state dict -> build template -> from_state_dict
+        elif isinstance(state, (dict, frozen_dict.FrozenDict)):
+            resolved_path = Path(resolved)
+
+            # Candidate directories where config might live
+            # - explicit run_dir
+            # - same directory as ckpt (tmp smoke test)
+            # - parent.parent (common "run_dir/checkpoints/ckpt_xxx")
+            candidate_dirs = []
+            if run_dir is not None:
+                candidate_dirs.append(Path(run_dir))
+            candidate_dirs.append(resolved_path.parent)
+            candidate_dirs.append(resolved_path.parent.parent)
+
+            cfg_dict: Dict = {}
+            if config_path is not None:
+                config_path_used = Path(config_path)
+                cfg_dict = _extract_config(_load_config(config_path_used))
             else:
-                raise TypeError(
-                    f"Loaded checkpoint type {type(state)} is not SACCbfLearner or a container of it"
-                )
+                for d in candidate_dirs:
+                    try:
+                        config_path_used = _find_config_path(d)
+                        cfg_dict = _extract_config(_load_config(config_path_used))
+                        break
+                    except FileNotFoundError:
+                        continue
+
+            # Filter config/kwargs to only those accepted by SACCbfLearner.create
+            filtered_cfg = _filter_create_kwargs(cfg_dict)
+            filtered_cfg.update(_filter_create_kwargs(kwargs))  # kwargs override config
+
+            template = SACCbfLearner.create(
+                seed=seed,
+                observation_space=observation_space,
+                action_space=action_space,
+                **filtered_cfg,
+            )
+            agent = serialization.from_state_dict(template, state)
+
+        else:
+            raise TypeError(
+                f"Loaded checkpoint type {type(state)} is not SACCbfLearner or state_dict"
+            )
+
+    # 4) Hard guard to avoid silent dict leakage
+    if not isinstance(agent, SACCbfLearner):
+        raise TypeError(f"load_sac_cbf produced {type(agent)} instead of SACCbfLearner")
 
     state_holder = {"agent": agent}
     policy_fn = _build_policy_fn(state_holder, deterministic=deterministic)
 
-    meta = {
+    meta: Dict = {
         "algo": "sac_cbf",
         "ckpt_resolved_path": str(resolved),
         "step": _extract_step(resolved),
@@ -163,4 +197,6 @@ def load_sac_cbf(
     }
     if config_path_used is not None:
         meta["config_path"] = str(config_path_used)
+
     return state_holder["agent"], policy_fn, meta
+

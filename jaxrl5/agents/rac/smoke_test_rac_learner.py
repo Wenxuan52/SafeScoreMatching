@@ -86,7 +86,28 @@ def main() -> None:
     with tempfile.TemporaryDirectory() as tmpdir:
         ckpt_path = f"{tmpdir}/ckpt.msgpack"
         new_agent.save(ckpt_path)
-        loaded = RACLearner.load(ckpt_path)
+
+        loaded_obj = RACLearner.load(ckpt_path)
+
+        # ✅ 兼容两种实现：
+        # 1) load() 直接返回 RACLearner
+        # 2) load() 返回 dict（raw state / payload）
+        if isinstance(loaded_obj, RACLearner):
+            loaded = loaded_obj
+        else:
+            from flax import serialization as flax_serialization
+
+            # 有些实现会存 {"state": state_dict, "meta": ...}，有些直接就是 state_dict
+            state = loaded_obj["state"] if isinstance(loaded_obj, dict) and "state" in loaded_obj else loaded_obj
+
+            template = RACLearner.create(
+                seed=0,
+                observation_space=observation_space,
+                action_space=action_space,
+                hidden_dims=(32, 32),
+            )
+            loaded = flax_serialization.from_state_dict(template, state)
+
         loaded_action, _ = loaded.eval_actions(single_obs)
 
     np.testing.assert_allclose(
@@ -94,6 +115,7 @@ def main() -> None:
     )
 
     print("RAC smoke test passed.")
+
 
 
 if __name__ == "__main__":

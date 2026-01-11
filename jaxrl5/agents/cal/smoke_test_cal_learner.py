@@ -23,7 +23,7 @@ def main() -> None:
         seed=0,
         observation_space=observation_space,
         action_space=action_space,
-        hidden_dims=(32, 32),
+        hidden_dims=(256, 256), # 需要和训练时设定的结构一致
     )
 
     with tempfile.TemporaryDirectory() as tmpdir:

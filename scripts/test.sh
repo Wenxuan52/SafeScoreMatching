@@ -14,4 +14,4 @@ nvidia-smi
 source /scratch_root/wy524/miniconda3/etc/profile.d/conda.sh
 conda activate jaxrl
 
-python jaxrl5/agents/sac/smoke_test_sac_lag_learner.py
+python jaxrl5/agents/rac/smoke_test_rac_learner.py
