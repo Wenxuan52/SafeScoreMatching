@@ -4,21 +4,31 @@
 from __future__ import annotations
 
 import argparse
+import inspect
+import json
 import os
-from typing import Iterable, List, Tuple
+from pathlib import Path
+from typing import List, Optional, Tuple
+
+os.environ.setdefault("MPLCONFIGDIR", "/tmp/matplotlib")
 
 import gymnasium as gym
 import jax
 import jax.numpy as jnp
 import matplotlib.pyplot as plt
 import numpy as np
+from flax import serialization
+from flax.core import frozen_dict
 
 from jaxrl5.envs.quadrotor_tracking_2d import make_quadrotor_tracking_2d_env
 from jaxrl5.networks import ddpm_sampler
+from jaxrl5.tools.checkpoints import resolve_checkpoint
 from jaxrl5.tools.load_rac import load_rac
 from jaxrl5.tools.load_sac_lag import load_sac_lag
-from jaxrl5.tools.load_ssm import load_ssm
 from jaxrl5.wrappers.action_rescale import SymmetricActionWrapper
+from jaxrl5.agents.safe_matching.safe_matching_learner import (
+    SafeScoreMatchingLearner,
+)
 
 
 def parse_float_list(text: str) -> List[float]:
@@ -39,6 +49,168 @@ def create_env(env_name: str, seed: int) -> gym.Env:
 
     env.reset(seed=seed)
     return env
+
+
+def _iter_array_leaves_with_paths(tree) -> List[Tuple[str, np.ndarray]]:
+    stack = [("", tree)]
+    leaves: List[Tuple[str, np.ndarray]] = []
+    while stack:
+        path, node = stack.pop()
+        if isinstance(node, (dict, frozen_dict.FrozenDict)):
+            for key, value in node.items():
+                new_path = f"{path}/{key}" if path else str(key)
+                stack.append((new_path, value))
+        elif isinstance(node, (list, tuple)):
+            for idx, value in enumerate(node):
+                new_path = f"{path}/{idx}" if path else str(idx)
+                stack.append((new_path, value))
+        else:
+            try:
+                arr = np.asarray(node)
+            except Exception:
+                continue
+            if hasattr(arr, "ndim"):
+                leaves.append((path, arr))
+    return leaves
+
+
+def _unwrap_params(tree):
+    current = tree
+    while isinstance(current, (dict, frozen_dict.FrozenDict)) and "params" in current:
+        next_tree = current.get("params")
+        if isinstance(next_tree, (dict, frozen_dict.FrozenDict)):
+            current = next_tree
+        else:
+            break
+    return current
+
+
+def _infer_mlp_hidden_dims_from_params(params_subtree) -> Tuple[int, ...]:
+    params_subtree = _unwrap_params(params_subtree)
+    leaves = _iter_array_leaves_with_paths(params_subtree)
+    kernel_candidates = [
+        (p, a)
+        for p, a in leaves
+        if a.ndim == 2 and (p.lower().endswith("kernel") or "kernel" in p.lower())
+    ]
+    if not kernel_candidates:
+        kernel_candidates = [(p, a) for p, a in leaves if a.ndim == 2]
+    if len(kernel_candidates) < 1:
+        return ()
+
+    shapes = [(path, arr.shape) for path, arr in kernel_candidates]
+    chains = []
+    for path, (in_dim, out_dim) in shapes:
+        chain = [(path, (in_dim, out_dim))]
+        used = {path}
+        current_out = out_dim
+        improved = True
+        while improved:
+            improved = False
+            candidates = [
+                (p, s)
+                for p, s in shapes
+                if p not in used and s[0] == current_out
+            ]
+            if candidates:
+                p_sel, s_sel = max(candidates, key=lambda x: x[1][1])
+                chain.append((p_sel, s_sel))
+                used.add(p_sel)
+                current_out = s_sel[1]
+                improved = True
+        chains.append(chain)
+    best_chain = max(chains, key=len)
+    chain_shapes = [shape for _, shape in best_chain]
+    if len(chain_shapes) <= 1:
+        return ()
+    return tuple(s[1] for s in chain_shapes[:-1])
+
+
+def _find_config_path(run_dir: Path) -> Optional[Path]:
+    candidates = [
+        "config.json",
+        "variant.json",
+        "flags.json",
+        "args.json",
+        "params.json",
+    ]
+    for name in candidates:
+        cand = run_dir / name
+        if cand.exists():
+            return cand
+    return None
+
+
+def _load_config(path: Path) -> dict:
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def _filter_create_kwargs(cfg: dict) -> dict:
+    sig = inspect.signature(SafeScoreMatchingLearner.create)
+    allowed = set(sig.parameters.keys())
+    return {k: v for k, v in cfg.items() if k in allowed}
+
+
+def _load_ssm_with_inferred_dims(
+    ckpt_path: str,
+    step: Optional[int],
+    observation_space: gym.Space,
+    action_space: gym.Space,
+    seed: int,
+) -> Tuple[SafeScoreMatchingLearner, dict]:
+    resolved = Path(resolve_checkpoint(ckpt_path, step))
+    data = resolved.read_bytes()
+    state = serialization.msgpack_restore(data)
+    if isinstance(state, SafeScoreMatchingLearner):
+        return state, {"ckpt_resolved_path": str(resolved)}
+
+    if not isinstance(state, dict):
+        raise TypeError(f"Unsupported checkpoint type: {type(state)}")
+
+    score_state = state.get("score_model", {})
+    safety_state = state.get("safety_critic", {})
+    critic_state = state.get("critic_1", {})
+    lambda_state = state.get("lambda_net", {})
+
+    actor_hidden_dims = _infer_mlp_hidden_dims_from_params(score_state.get("params", {}))
+    safety_hidden_dims = _infer_mlp_hidden_dims_from_params(
+        safety_state.get("params", {})
+    )
+    critic_hidden_dims = _infer_mlp_hidden_dims_from_params(
+        critic_state.get("params", {})
+    )
+    lambda_hidden_dims = _infer_mlp_hidden_dims_from_params(
+        lambda_state.get("params", {})
+    )
+
+    run_dir = resolved.parent.parent if resolved.parent.name == "checkpoints" else resolved.parent
+    cfg = {}
+    config_path = _find_config_path(run_dir)
+    if config_path is not None:
+        cfg = _load_config(config_path)
+
+    create_kwargs = _filter_create_kwargs(cfg)
+    if actor_hidden_dims:
+        create_kwargs["actor_hidden_dims"] = actor_hidden_dims
+    if safety_hidden_dims:
+        create_kwargs["safety_hidden_dims"] = safety_hidden_dims
+    if critic_hidden_dims:
+        create_kwargs["critic_hidden_dims"] = critic_hidden_dims
+    if lambda_hidden_dims:
+        create_kwargs["lambda_hidden_dims"] = lambda_hidden_dims
+
+    template = SafeScoreMatchingLearner.create(
+        seed=seed,
+        observation_space=observation_space,
+        action_space=action_space,
+        **create_kwargs,
+    )
+    agent = serialization.from_state_dict(template, state)
+    meta = {"ckpt_resolved_path": str(resolved)}
+    if config_path is not None:
+        meta["config_path"] = str(config_path)
+    return agent, meta
 
 
 def get_ref_from_env(
@@ -229,7 +401,7 @@ def main() -> None:
     act_space = env.action_space
 
     if args.algo == "rac":
-        agent, _, meta = load_rac(
+        agent, _, _ = load_rac(
             args.ckpt_path,
             step=args.step,
             observation_space=obs_space,
@@ -239,17 +411,12 @@ def main() -> None:
         )
         threshold = 0.0
     elif args.algo == "ssm":
-        agent, _, meta = load_ssm(
-            args.ckpt_path,
-            step=args.step,
-            observation_space=obs_space,
-            action_space=act_space,
-            seed=args.seed,
-            deterministic=True,
+        agent, _ = _load_ssm_with_inferred_dims(
+            args.ckpt_path, args.step, obs_space, act_space, args.seed
         )
         threshold = 0.0
     else:
-        agent, _, meta = load_sac_lag(
+        agent, _, _ = load_sac_lag(
             args.ckpt_path,
             step=args.step,
             observation_space=obs_space,
