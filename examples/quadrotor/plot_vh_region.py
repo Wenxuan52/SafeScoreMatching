@@ -318,7 +318,6 @@ def eval_qh_batch_chunk(
         {"params": agent.cost_critic.params},
         obs_tiled,
         actions_flat,
-        training=False,
     )
     return qcs.min(axis=0)
 
