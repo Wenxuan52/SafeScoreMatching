@@ -353,25 +353,119 @@ def plot_vh_grid(
     threshold: float,
     out_path: str,
 ) -> None:
-    cols = len(z_dot_list)
-    fig, axes = plt.subplots(1, cols, figsize=(5 * cols, 4), squeeze=False)
+    import numpy as _np
+    import matplotlib.pyplot as _plt
+    from matplotlib.colors import TwoSlopeNorm
+    from matplotlib.patches import Circle
+    import matplotlib.patheffects as pe
 
-    all_vh = np.concatenate([v.reshape(-1) for v in vh_list])
-    vmin = float(np.nanmin(all_vh))
-    vmax = float(np.nanmax(all_vh))
+    cols = len(z_dot_list)
+
+    # -------------------- 数据范围 & 轴比例（保证圆不变形） --------------------
+    xlim = (float(_np.min(X)), float(_np.max(X)))
+    ylim = (float(_np.min(Z)), float(_np.max(Z)))
+    x_range = max(xlim[1] - xlim[0], 1e-6)
+    y_range = max(ylim[1] - ylim[0], 1e-6)
+    axes_ratio = x_range / y_range  # 每个子图“理想的”宽高比（宽/高）
+
+    # -------------------- 颜色归一化：发散色图 + 0 居中 --------------------
+    all_vh = _np.concatenate([v.reshape(-1) for v in vh_list])
+    all_vh = all_vh[_np.isfinite(all_vh)]
+    if all_vh.size == 0:
+        vmin, vmax = -1.0, 1.0
+    else:
+        max_abs = float(_np.nanmax(_np.abs(all_vh)))
+        max_abs = max(max_abs, 1e-6)
+        vmin, vmax = -max_abs, max_abs
+
+    norm = TwoSlopeNorm(vmin=vmin, vcenter=0.0, vmax=vmax)
+    levels = _np.linspace(vmin, vmax, 61)
+
+    # -------------------- 布局：按 axes_ratio 调整子图形状 + 独立 colorbar --------------------
+    base_h = 4.8
+    per_ax_w = base_h * axes_ratio
+    cbar_w = 0.55
+    fig_w = cols * per_ax_w + cbar_w + 0.6
+
+    fig = _plt.figure(figsize=(fig_w, base_h))
+    # 每个子图的 width_ratios 用 axes_ratio，确保行内子图宽高更符合数据比例
+    gs = fig.add_gridspec(
+        nrows=1,
+        ncols=cols + 1,
+        width_ratios=[axes_ratio] * cols + [0.10],
+        wspace=0.22,
+    )
+    axes = [_plt.subplot(gs[0, i]) for i in range(cols)]
+    cax = _plt.subplot(gs[0, cols])
+
+    # 字体大小（可按喜好再调）
+    title_fs = 22
+    label_fs = 18
+    tick_fs = 16
+
+    # 阈值等值线颜色：用高对比“亮黄”，并加黑色描边，任何底色都清晰
+    boundary_color = "orange"  # 金黄
+    boundary_effects = [pe.Stroke(linewidth=2.6, foreground="black"), pe.Normal()]
 
     last_im = None
-    for idx, (vh, z_dot) in enumerate(zip(vh_list, z_dot_list)):
-        ax = axes[0, idx]
-        last_im = ax.contourf(X, Z, vh, levels=50, vmin=vmin, vmax=vmax, cmap="viridis")
-        ax.contour(X, Z, vh, levels=[threshold], colors="white", linewidths=1.5)
-        ax.set_title(f"z_dot={z_dot}")
-        ax.set_xlabel("x")
-        ax.set_ylabel("z")
+    for ax, vh, z_dot in zip(axes, vh_list, z_dot_list):
+        # 主图：发散 cmap（正负明显）
+        last_im = ax.contourf(
+            X, Z, vh,
+            levels=levels,
+            cmap="RdBu_r",   # 你也可以改成 "seismic"（更“硬”）或 "coolwarm"
+            norm=norm,
+            extend="both",
+        )
 
-    fig.colorbar(last_im, ax=axes.ravel().tolist(), shrink=0.9)
-    fig.tight_layout()
-    fig.savefig(out_path, dpi=200)
+        # 阈值等值线（替代原白色虚线）：高对比颜色 + 描边
+        cs = ax.contour(
+            X, Z, vh,
+            levels=[threshold],
+            colors=[boundary_color],
+            linestyles="--",
+            linewidths=2.0,
+        )
+        for coll in cs.collections:
+            coll.set_path_effects(boundary_effects)
+
+        # 两条黑色实线：y(这里是 z)=0.5 和 1.5
+        ax.axhline(0.5, color="black", linewidth=2.0)
+        ax.axhline(1.5, color="black", linewidth=2.0)
+
+        # 黑色虚线圆：圆心 (0,1)，半径 1（配合 equal aspect 保证不变形）
+        circle = Circle(
+            (0.0, 1.0),
+            radius=1.0,
+            fill=False,
+            edgecolor="black",
+            linestyle="--",
+            linewidth=2.0,
+        )
+        ax.add_patch(circle)
+
+        # 关键：保证数据单位等比例 -> 圆不变椭圆；同时 axes box 会按数据范围变成长方形
+        ax.set_aspect("equal", adjustable="box")
+
+        # 标题：LaTeX 的 z 上加点
+        ax.set_title(rf"$\dot{{z}} = {z_dot:g}$", fontsize=title_fs)
+
+        # 轴标签与刻度
+        ax.set_xlabel("x", fontsize=label_fs)
+        ax.set_ylabel("z", fontsize=label_fs)
+        ax.set_xticks([-1.0, 0.0, 1.0])
+        ax.set_yticks([0.5, 1.0, 1.5])
+        ax.tick_params(axis="both", labelsize=tick_fs)
+
+        ax.set_xlim(*xlim)
+        ax.set_ylim(*ylim)
+
+    # colorbar 放到专用 cax（不会盖在子图上）
+    cb = fig.colorbar(last_im, cax=cax)
+    cb.ax.tick_params(labelsize=tick_fs)
+
+    fig.savefig(out_path, dpi=200, bbox_inches="tight")
+    _plt.close(fig)
 
 
 def main() -> None:

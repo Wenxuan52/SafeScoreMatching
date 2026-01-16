@@ -18,7 +18,7 @@ def get_config() -> ConfigDict:
     config.clip_sampler = True
     config.beta_schedule = "vp"
     config.M_q = 10.0
-    config.cost_limit = 0.0
+    config.cost_limit = 1.0
     config.safety_discount = 0.99
     config.safety_lambda = 5.0
     config.alpha_coef = 0.25

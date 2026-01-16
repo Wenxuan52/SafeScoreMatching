@@ -33,7 +33,7 @@ except Exception:
 
 METHODS = ["ssm", "rac", "sac_lag"]
 METHOD_LABELS = {
-    "ssm": "SSM",
+    "ssm": "SSM (Ours)",
     "rac": "RAC",
     "sac_lag": "SAC-Lag",
 }
@@ -219,58 +219,127 @@ def _plot_results(
     save_pdf: bool,
     dpi: int,
 ) -> None:
-    fig, axes = plt.subplots(3, 2, figsize=(12, 14), constrained_layout=True)
+    from matplotlib.patches import Circle
+    from mpl_toolkits.axes_grid1 import make_axes_locatable
+
+    # Layout: 2 rows (metrics) x 3 cols (methods)
+    fig, axes = plt.subplots(2, 3, figsize=(18, 8))
 
     extent = [x_grid[0], x_grid[-1], z_grid[0], z_grid[-1]]
 
-    col1_title = f"Short-horizon safety probability (H={horizon_short}, MC={mc_short})"
-    col2_title = f"Time-to-Enter-and-Stay (cap={cap_value}, stay={stay_steps})"
+    # Row labels (swapped with previous layout)
+    row_labels = ["Safe Set", "Steps to Safe Set"]
 
-    col1_images = []
-    col2_images = []
+    # Tick settings
+    xticks = [-1.0, 0.0, 1.0]
+    yticks = [0.5, 1.0, 1.5]
+    tick_labelsize = 16
 
-    for row, algo in enumerate(METHODS):
+    # Circle overlay (dashed): center (0,1), radius 1
+    circle = Circle((0.0, 1.0), radius=1.0, fill=False, linestyle="--", linewidth=2.0, color="black")
+
+    # Plot all panels
+    top_row_imgs = []
+    bottom_row_imgs = []
+
+    for col, algo in enumerate(METHODS):
         label = METHOD_LABELS[algo]
-        ax1 = axes[row, 0]
-        ax2 = axes[row, 1]
 
-        img1 = ax1.imshow(
-            p_safe_all[row],
+        ax_top = axes[0, col]
+        ax_bot = axes[1, col]
+
+        img_top = ax_top.imshow(
+            p_safe_all[col],
             origin="lower",
             extent=extent,
             vmin=0.0,
             vmax=1.0,
-            cmap="viridis",
+            cmap="Blues",
             aspect="auto",
         )
-        img2 = ax2.imshow(
-            tts_all[row],
+        img_bot = ax_bot.imshow(
+            tts_all[col],
             origin="lower",
             extent=extent,
             vmin=0.0,
             vmax=float(cap_value),
-            cmap="viridis_r",
+            cmap="Blues",
             aspect="auto",
         )
-        col1_images.append(img1)
-        col2_images.append(img2)
+        top_row_imgs.append(img_top)
+        bottom_row_imgs.append(img_bot)
 
-        ax1.set_ylabel(f"{label}\nz")
-        ax2.set_ylabel(f"{label}\nz")
-        for ax in (ax1, ax2):
-            ax.set_xlabel("x")
-            ax.axhline(0.5, color="black", linewidth=1.0)
-            ax.axhline(1.5, color="black", linewidth=1.0)
-            ax.axvline(-2.0, color="black", linewidth=1.0, alpha=0.6)
-            ax.axvline(2.0, color="black", linewidth=1.0, alpha=0.6)
+        # Column titles (methods)
+        title_size = 20
+        ax_top.set_title(label, fontsize=title_size, pad=20)
 
-    axes[0, 0].set_title(col1_title)
-    axes[0, 1].set_title(col2_title)
+        # Axis labels & ticks
+        axis_labelsize = 16
+        for ax in (ax_top, ax_bot):
+            ax.set_xlabel("x", fontsize=axis_labelsize)
+            ax.set_ylabel("z", fontsize=axis_labelsize)
 
-    cbar1 = fig.colorbar(col1_images[0], ax=axes[:, 0], fraction=0.02, pad=0.02)
-    cbar1.set_label("p_safe")
-    cbar2 = fig.colorbar(col2_images[0], ax=axes[:, 1], fraction=0.02, pad=0.02)
-    cbar2.set_label(f"TTS (capped at {cap_value})")
+            ax.set_xticks(xticks)
+            ax.set_yticks(yticks)
+            ax.tick_params(axis="both", which="both", labelsize=tick_labelsize)
+
+            # Keep original reference lines
+            ax.axhline(0.5, color="black", linewidth=2.0)
+            ax.axhline(1.5, color="black", linewidth=2.0)
+            ax.axvline(-1.5, color="black", linewidth=1.0, alpha=0.6)
+            ax.axvline(1.5, color="black", linewidth=1.0, alpha=0.6)
+
+            # Add dashed circle (copy per-axes to avoid shared artist issues)
+            ax.add_patch(
+                Circle(
+                    (circle.center[0], circle.center[1]),
+                    radius=circle.get_radius(),
+                    fill=False,
+                    linestyle="--",
+                    linewidth=2.0,
+                    color="black",
+                )
+            )
+
+            # Make circle look like a circle in data coords
+            ax.set_aspect("equal", adjustable="box")
+
+    x_row_label = -0.25
+
+    # Row labels (left side, separate from y-axis label "z")
+    axes[0, 0].text(
+        x_row_label,
+        0.5,
+        row_labels[0],
+        transform=axes[0, 0].transAxes,
+        rotation=90,
+        va="center",
+        ha="center",
+        fontsize=16,
+    )
+    axes[1, 0].text(
+        x_row_label,
+        0.5,
+        row_labels[1],
+        transform=axes[1, 0].transAxes,
+        rotation=90,
+        va="center",
+        ha="center",
+        fontsize=16,
+    )
+
+    # Colorbars: one per row, attached to the last subplot in that row
+    ax_cbar_top = axes[0, -1]
+    div_top = make_axes_locatable(ax_cbar_top)
+    cax_top = div_top.append_axes("right", size="5%", pad=0.05)
+    cbar1 = fig.colorbar(top_row_imgs[-1], cax=cax_top)
+    cbar1.ax.tick_params(labelsize=14)
+
+    ax_cbar_bot = axes[1, -1]
+    div_bot = make_axes_locatable(ax_cbar_bot)
+    cax_bot = div_bot.append_axes("right", size="5%", pad=0.05)
+    cbar2 = fig.colorbar(bottom_row_imgs[-1], cax=cax_bot)
+    cbar2.ax.tick_params(labelsize=14)
 
     fig.savefig(save_path, dpi=dpi)
     if save_pdf:
@@ -351,7 +420,7 @@ def main() -> None:
     parser.add_argument("--z_max", type=float, default=2.0)
     parser.add_argument("--cache_path", default="")
     parser.add_argument("--no_cache", action="store_true", default=False)
-    parser.add_argument("--save_dir", default=os.path.dirname(__file__))
+    parser.add_argument("--save_dir", default=os.path.join(os.path.dirname(__file__), "figures"))
     parser.add_argument("--save_pdf", action="store_true", default=False)
     parser.add_argument("--dpi", type=int, default=200)
     args = parser.parse_args()

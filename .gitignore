@@ -9,3 +9,7 @@ wandb/
 *.out
 
 results/
+
+visual/
+
+examples/quadrotor/figures/

@@ -301,7 +301,7 @@ def _training_loop(run_dir: str) -> None:
 
     train_env = TerminationPenaltyWrapper(
         train_env,
-        penalty=-6000.0,
+        penalty=0.0,
         apply_on_truncated=False,
     )
 
