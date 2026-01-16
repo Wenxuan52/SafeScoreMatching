@@ -1,14 +1,13 @@
 #! /usr/bin/env python
 from __future__ import annotations
 
-import gymnasium as gym
 import numpy as np
 import tqdm
 import wandb
 from absl import app, flags
 from ml_collections import config_flags
 
-from jaxrl5.agents.cal.agent import CALAgent
+from jaxrl5.agents.sac.sac_lag_learner import SACLagLearner
 from jaxrl5.data import ReplayBuffer
 from jaxrl5.envs import make_safety_env
 from jaxrl5.evaluation import evaluate
@@ -18,7 +17,7 @@ from jaxrl5.wrappers import SafetyRecordEpisodeStatistics, WANDBVideo
 
 FLAGS = flags.FLAGS
 
-flags.DEFINE_string("project_name", "jaxrl5_cal_online", "wandb project name.")
+flags.DEFINE_string("project_name", "jaxrl5_sac_lag_online", "wandb project name.")
 flags.DEFINE_string("run_name", "", "wandb run name.")
 flags.DEFINE_string(
     "env_name",
@@ -37,20 +36,13 @@ flags.DEFINE_integer(
 flags.DEFINE_boolean("tqdm", True, "Use tqdm progress bar.")
 flags.DEFINE_boolean("wandb", False, "Enable wandb logging.")
 flags.DEFINE_boolean("save_video", False, "Upload videos during evaluation.")
-flags.DEFINE_integer("utd_ratio", 10, "Update-to-data ratio.")
+flags.DEFINE_integer("utd_ratio", 1, "Update-to-data ratio.")
 flags.DEFINE_integer("epoch_length", 400, "Number of environment steps per epoch.")
-
-flags.DEFINE_float("k_ucb", 1.0, "UCB coefficient for cost critic.")
-flags.DEFINE_float("alm_c", 10.0, "Augmented Lagrangian coefficient.")
-flags.DEFINE_float("lambda_lr", 1e-4, "Step size for lambda updates.")
-flags.DEFINE_integer("qc_ens_size", 4, "Number of heads in the cost critic ensemble.")
-flags.DEFINE_float("cost_lim", 10.0, "Average cost limit.")
-flags.DEFINE_boolean("safetygym", True, "Use Safety-Gymnasium environment wrapper.")
 
 config_flags.DEFINE_config_file(
     "config",
-    "examples/states/configs/cal_config.py",
-    "Path to training hyperparameter configuration.",
+    "examples/states/configs/sac_lag_config.py",
+    "Path to the training hyperparameter configuration.",
     lock_config=False,
 )
 
@@ -67,35 +59,13 @@ def _maybe_init_wandb():
             wandb.init(project=FLAGS.project_name)
         wandb.config.update(FLAGS)
 
+
 def _make_env(env_name: str, seed: int, allow_video: bool = True):
     env = make_safety_env(env_name, seed=seed)
     env = SafetyRecordEpisodeStatistics(env, deque_size=1)
     if allow_video and FLAGS.wandb and FLAGS.save_video:
         env = WANDBVideo(env)
     return env
-
-# def _make_env(env_name: str, seed: int, render_mode: str | None = None):
-#     if FLAGS.safetygym:
-#         env = make_safety_env(env_name, seed=seed, render_mode=render_mode)
-
-#         try:
-#             builder = env.env.env.env
-#             task = builder.task
-#             if task.world is None:
-#                 task._build()
-#             model = task.world.model
-#             old_ts = model.opt.timestep
-#             model.opt.timestep = 0.01
-#             print(f"[INFO] Changed timestep from {old_ts} → {model.opt.timestep}")
-#         except Exception as e:
-#             print(f"[WARN] Could not modify timestep automatically: {e}")
-#         env = SafetyRecordEpisodeStatistics(env, deque_size=1)
-#     else:
-#         env = gym.make(env_name, render_mode=render_mode)
-#         env.reset(seed=seed)
-#     if FLAGS.wandb and FLAGS.save_video and render_mode is None:
-#         env = WANDBVideo(env)
-#     return env
 
 
 def _make_eval_policy(agent):
@@ -108,14 +78,6 @@ def _make_eval_policy(agent):
 
     return policy
 
-def _sample(env, action, episode_length):
-
-    next_obs, reward, cost, terminated, truncated, info = env.step(action)
-
-    if episode_length + 1 >= 400:
-        truncated = True
-
-    return next_obs, reward, cost, terminated, truncated, info 
 
 def main(_):
     _maybe_init_wandb()
@@ -130,19 +92,26 @@ def main(_):
     replay_buffer.seed(FLAGS.seed)
 
     config = FLAGS.config.copy_and_resolve_references()
-    config.k_ucb = FLAGS.k_ucb
-    config.alm_c = FLAGS.alm_c
-    config.lambda_lr = FLAGS.lambda_lr
-    config.qc_ens_size = FLAGS.qc_ens_size
-    config.cost_limit = FLAGS.cost_lim
-
     if not config.get("target_entropy"):
-        config.target_entropy = -float(train_env.action_space.shape[-1])
+        config.target_entropy = -float(train_env.action_space.shape[-1]) / 2
 
     agent_kwargs = dict(config)
-    agent_kwargs.pop("model_cls", None)
+    for key in (
+        "model_cls",
+        "env_name",
+        "seed",
+        "max_steps",
+        "batch_size",
+        "start_training",
+        "eval_interval",
+        "eval_episodes",
+        "log_interval",
+        "utd_ratio",
+        "epoch_length",
+    ):
+        agent_kwargs.pop(key, None)
 
-    agent = CALAgent.create(
+    agent = SACLagLearner.create(
         FLAGS.seed,
         train_env.observation_space,
         train_env.action_space,
@@ -153,9 +122,7 @@ def main(_):
     episode_return, episode_cost, episode_length = 0.0, 0.0, 0
     epoch_reward, epoch_cost = 0.0, 0.0
     experiment_name = FLAGS.run_name or FLAGS.project_name
-    latest_cost_mean = None
 
-    print("Training started")
     for step in tqdm.tqdm(
         range(1, FLAGS.max_steps + 1), smoothing=0.1, disable=not FLAGS.tqdm
     ):
@@ -166,7 +133,6 @@ def main(_):
             action = np.asarray(action, dtype=np.float32)
 
         next_obs, reward, cost, terminated, truncated, info = train_env.step(action)
-        # next_obs, reward, cost, terminated, truncated, info = _sample(train_env, action, episode_length)
         done = bool(terminated or truncated)
 
         replay_buffer.insert(
@@ -188,11 +154,11 @@ def main(_):
 
         if step >= FLAGS.start_training:
             batch = replay_buffer.sample(FLAGS.batch_size * FLAGS.utd_ratio)
-            agent, update_info = agent.update(batch, FLAGS.utd_ratio)
+            agent, update_info = agent.update(batch)
 
             if FLAGS.wandb and step % FLAGS.log_interval == 0:
                 wandb.log(
-                    {f"train/{k.split('/', 1)[-1]}": float(v) for k, v in update_info.items()},
+                    {f"training/{k}": float(v) for k, v in update_info.items()},
                     step=step,
                 )
 
@@ -200,9 +166,9 @@ def main(_):
             if FLAGS.wandb:
                 wandb.log(
                     {
-                        "train/return": episode_return,
-                        "train/cost": episode_cost,
-                        "train/length": episode_length,
+                        "training/return": episode_return,
+                        "training/cost": episode_cost,
+                        "training/length": episode_length,
                     },
                     step=step,
                 )
@@ -240,23 +206,12 @@ def main(_):
                     f"len={metrics['eval/ep_len_mean']:.1f}"
                 )
 
-            history_metrics = {
-                "eval/return_std": metrics["eval/return_std"],
-                "eval/return_mean": metrics["eval/return_mean"],
-                "eval/cost_mean": metrics["eval/cost_mean"],
-                "eval/cost_std": metrics.get("eval/cost_std", float("nan")),
-                "eval/violation_rate_mean": metrics["eval/violation_rate_mean"],
-                "eval/violation_rate_std": metrics["eval/violation_rate_std"],
-                "training/cost_mean": latest_cost_mean
-                if latest_cost_mean is not None
-                else float("nan"),
-            }
             append_history(
                 step,
                 FLAGS.env_name,
                 experiment_name,
                 FLAGS.seed,
-                history_metrics,
+                metrics,
             )
 
     train_env.close()
@@ -264,7 +219,5 @@ def main(_):
 
 
 if __name__ == "__main__":
-
     wandb.login(key="7feaca49acb80e68486cc6e9c40b2f2c397a0fae")
-    
     app.run(main)
