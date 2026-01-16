@@ -245,6 +245,8 @@ def main(_):
                 "eval/return_mean": metrics["eval/return_mean"],
                 "eval/cost_mean": metrics["eval/cost_mean"],
                 "eval/cost_std": metrics.get("eval/cost_std", float("nan")),
+                "eval/violation_rate_mean": metrics["eval/violation_rate_mean"],
+                "eval/violation_rate_std": metrics["eval/violation_rate_std"],
                 "training/cost_mean": latest_cost_mean
                 if latest_cost_mean is not None
                 else float("nan"),
