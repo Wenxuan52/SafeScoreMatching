@@ -7,7 +7,7 @@ import wandb
 from absl import app, flags
 from ml_collections import config_flags
 
-from jaxrl5.agents.rac.rac_learner import RACLearner
+from jaxrl5.agents.sac.sac_cbf_learner import SACCbfLearner
 from jaxrl5.data import ReplayBuffer
 from jaxrl5.envs import make_safety_env
 from jaxrl5.evaluation import evaluate
@@ -17,7 +17,7 @@ from jaxrl5.wrappers import SafetyRecordEpisodeStatistics, WANDBVideo
 
 FLAGS = flags.FLAGS
 
-flags.DEFINE_string("project_name", "jaxrl5_rac_online", "wandb project name.")
+flags.DEFINE_string("project_name", "jaxrl5_sac_cbf_online", "wandb project name.")
 flags.DEFINE_string("run_name", "", "wandb run name.")
 flags.DEFINE_string(
     "env_name",
@@ -41,7 +41,7 @@ flags.DEFINE_integer("epoch_length", 400, "Number of environment steps per epoch
 
 config_flags.DEFINE_config_file(
     "config",
-    "examples/states/configs/rac_config.py",
+    "examples/states/configs/sac_cbf_config.py",
     "Path to the training hyperparameter configuration.",
     lock_config=False,
 )
@@ -93,7 +93,7 @@ def main(_):
 
     config = FLAGS.config.copy_and_resolve_references()
     if not config.get("target_entropy"):
-        config.target_entropy = -float(train_env.action_space.shape[-1])
+        config.target_entropy = -float(train_env.action_space.shape[-1]) / 2
 
     agent_kwargs = dict(config)
     for key in (
@@ -111,7 +111,7 @@ def main(_):
     ):
         agent_kwargs.pop(key, None)
 
-    agent = RACLearner.create(
+    agent = SACCbfLearner.create(
         FLAGS.seed,
         train_env.observation_space,
         train_env.action_space,
@@ -122,7 +122,6 @@ def main(_):
     episode_return, episode_cost, episode_length = 0.0, 0.0, 0
     epoch_reward, epoch_cost = 0.0, 0.0
     experiment_name = FLAGS.run_name or FLAGS.project_name
-    latest_cost_mean = None
 
     for step in tqdm.tqdm(
         range(1, FLAGS.max_steps + 1), smoothing=0.1, disable=not FLAGS.tqdm
